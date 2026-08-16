@@ -191,12 +191,14 @@
 
 ;;; ── Query execution ──────────────────────────────────────────────────────────
 
-;;; Explicit override for run-query dispatch below. A consuming app adding
-;;; its own query type (eg :datomic, dispatched on map? query shape) binds
-;;; this to that type in its own endpoint wrapper the same way this ns's
-;;; `endpoint` does for :sql/:sparql; nil (the default, unbound) falls
-;;; through to :sql, since a bare query string with no override is assumed
-;;; SQL unless told otherwise.
+;;; run-query dispatches purely on this dynamic var, not on the query's own
+;;; shape — `endpoint` binds it to whatever query-type it was called with,
+;;; for the duration of the call, so :sql/:sparql (this ns) and any consuming
+;;; app's own extension (eg :datomic, dispatched on a Clojure map rather than
+;;; a query-language string) all route correctly automatically. Any code
+;;; calling `run-query` directly, outside an `endpoint` call (eg an eval
+;;; harness or a REPL helper), must bind this itself first. nil (the
+;;; default, unbound) falls through to :sql.
 (def ^:dynamic *query-type* nil)
 
 (defmulti run-query (fn [_q] (or *query-type* :sql)))
