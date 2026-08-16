@@ -1,0 +1,38 @@
+# hyperphor/nlq
+
+Natural-language query engine for structured databases — NL → SQL/SPARQL/Datomic, executed and
+returned as data, with an Alzabo schema as the LLM's "schema dictionary" and a generic
+semantic-column/click-to-inspect UI layer for SQL-backed projects.
+
+Extracted from [`ParkerICI/okc`](https://github.com/ParkerICI/okc) (private) — see that repo's
+`design/hyperphorization.md` for the full extraction history, the generic-vs-PICI-specific
+analysis it was based on, and the phased plan. This repo is Phase 1: the config-liftable core,
+made schema-configurable (any Alzabo schema, not a hardcoded one) as a precondition, not a
+follow-on.
+
+## What's here
+
+- `hyperphor.nlq.generate` — the `generate`/`run-query`/`example-queries` multimethod core:
+  NL → query text/code (`:sql`, `:sparql`, `:datomic`) → executed results.
+- `hyperphor.nlq.schema` — Alzabo schema loading + the semantic-column layer (`kind_field`
+  naming convention, per-column icon/doc/enum?/ref-kind metadata) — takes a schema as an
+  argument everywhere, not a hardcoded one.
+- `hyperphor.nlq.config` — per-project `:nlq` config lookup.
+- `hyperphor.nlq.inspect` — click an id/FK in a results grid, see that entity's full row.
+- `hyperphor.nlq.visgen` — NL + a result sample → Vega-Lite spec.
+- `hyperphor.nlq.evals` — eval harness for NL→query generation quality.
+- `hyperphor.nlq.sources.sql` — backend-agnostic SQL abstraction (`project-tables`/`query`
+  multimethods, DDL assembly) that a real backend (`sources.bigquery`, `sources.cirro`, or your
+  own) implements.
+- `hyperphor.nlq.sources.sparql` — SPARQL endpoint client (eg Wikidata Query Service).
+- `hyperphor.nlq.sources.bigquery`, `hyperphor.nlq.sources.cirro` — two real `sources.sql`
+  backend implementations, brought over from OKC as working examples/starting points.
+- `hyperphor.nlq.frontend.*` (ClojureScript, built on `hyperphor.way`) — `qbox` (generic NL-query
+  UI card), `sql-query` (full semantic-column results grid + click-to-inspect), `sparql-query`
+  (plain results grid, for query types without column semantics), `nlq-viz` (Vega-Lite viewer),
+  `universal-query` (cross-project picker).
+
+## What's *not* here (stays in okc, or wherever the consuming app is)
+
+CANDEL import/export, Cirro sheet-upload ETL, Google Cloud Storage glue, per-project data
+methods, availability charts — all genuinely application-specific, not part of the query engine.
