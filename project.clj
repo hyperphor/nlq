@@ -1,4 +1,4 @@
-(defproject com.hyperphor/nlq "0.1.0-SNAPSHOT"
+(defproject com.hyperphor/nlq "0.1.0"
   :description "Natural-language query engine for structured databases (SQL, SPARQL, ...) — extracted from ParkerICI/okc. See design/hyperphorization.md there for the extraction history."
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"
@@ -6,7 +6,7 @@
   :deploy-repositories [["clojars" {:sign-releases false}]]
   :dependencies [[org.clojure/clojure "1.12.5"]
                  [com.hyperphor/multitool "0.3.0"]
-                 [com.hyperphor/way "0.2.4"]
+                 [com.hyperphor/way "0.2.5"]
                  [com.hyperphor/alzabo "1.3.4" :exclusions [hiccup]]
                  [com.hyperphor/ellum "0.1.3"]
                  [org.clojure/data.json "2.5.2"]

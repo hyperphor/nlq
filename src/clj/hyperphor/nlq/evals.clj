@@ -7,10 +7,7 @@
    textually unrecognizable) and it runs each against a real project,
    scoring on whether the query ran without error and its results matched
    the case's :results spec.
-
-   Extracted from ParkerICI/okc's org.parkerici.okc.nlq.evals — the actual
-   eval-case data (`evals`/`evals-prince` there) was PICI project content
-   and stayed behind; bring your own via :eval-cases."
+"
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
             [hyperphor.nlq.generate :as generate]

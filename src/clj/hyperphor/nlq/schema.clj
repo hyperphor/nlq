@@ -7,11 +7,7 @@
    typically via that project's `:schema` config entry) and can share a
    common base schema across projects via Alzabo's own `:include`, the same
    way any other Alzabo schema composition works.
-
-   Extracted from ParkerICI/okc's org.parkerici.okc.schema — see that repo's
-   design/hyperphorization.md for why (okc's version hardcoded one
-   PICI-specific master schema, `umbra`, here instead of taking one as an
-   argument)."
+"
   (:require
    [hyperphor.multitool.core :as u]
    [hyperphor.multitool.cljcore :as ju]

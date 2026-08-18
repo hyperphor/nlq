@@ -5,12 +5,7 @@
    new dispatch keyword — the same way sources.bigquery/sources.cirro extend
    sources.sql's `query`/`project-tables` multimethods. Nothing here has a
    hard dependency on any one query type beyond :sql/:sparql.
-
-   Extracted from ParkerICI/okc's org.parkerici.okc.nlq.generate — see that
-   repo's design/hyperphorization.md. Notably NOT carried over: the
-   :datomic query type (a hard dependency on a specific Datomic connection
-   module, not a generic capability) stays in okc as a small local
-   extension of these multimethods."
+"
   (:require [hyperphor.multitool.core :as u]
             [hyperphor.multitool.cljcore :as ju]
             [hyperphor.ellellem.core :as llm]
