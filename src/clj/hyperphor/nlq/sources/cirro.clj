@@ -61,16 +61,22 @@
                   :throw-exceptions false})
      full-url)))
 
+(defn api-post-unchecked
+  [{:keys [host] :as db} url params]
+  (let [full-url (str "https://" host url)]
+    (client/post full-url
+                 {:body             (json/write-str params)
+                  :content-type     :application/json
+                  :headers          {"Authorization" (str "Bearer " (get-access-token db))}
+                  :as               :json ;Doesn't seem to work so we coerce in check-response
+                  :throw-exceptions false})))
+
+
 (defn api-post
   [{:keys [host] :as db} url params]
   (let [full-url (str "https://" host url)]
     (check-response
-     (client/post full-url
-                  {:body             (json/write-str params)
-                   :content-type     :application/json
-                   :headers          {"Authorization" (str "Bearer " (get-access-token db))}
-                   :as               :json ;Doesn't seem to work so we coerce in check-response
-                   :throw-exceptions false})
+     (api-post-unchecked db url params)
      full-url)))
 
 ;;; Cognito app client id, auth domain, and region are all tenant-specific —
@@ -251,7 +257,7 @@
         (recur (inc page) acc)))))
 
 (defn project-sheets
-  [{:keys [project subproject project-l] :as db}]
+  [{:keys [project subproject] :as db}]
   (->> (api-get db (u/tx "/api/projects/{{project}}/sheets") {})
        (filter #(or (nil? subproject)
                     (str/includes? (:name %) subproject)))
@@ -625,4 +631,118 @@
 ;;; TODO Dashboards aren't yet enabled
 (comment
   (api-get (:db (nlqc/project-named "my-project")) "/api/dashboards" {}))
+
+
+(def ocra-db
+    {:type :cirro
+     :host "ocra.cirro.bio"
+     :auth {:type :desktop}                 ;I'm not allowed OAuth presently
+     :project "16da32ba-59a8-4700-aba4-be36e28dd5fe"
+     })
+
+(defn project-datasets
+  [{:keys [project subproject] :as db}]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/datasets") {})
+       ;; TODO look at :nextToken for paging
+       :data))
+
+;;; Has more including s3: location
+(u/defn-memoized get-dataset
+  [{:keys [project subproject] :as db} dataset]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}") {})
+       ))
+
+(defn get-dataset-files
+  [{:keys [project subproject] :as db} dataset]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}/files") {})
+       ))
+
+;;; Having to guess at access type. See
+;;; https://github.com/CirroBio/Cirro-components/blob/nlq-demo/node_modules/%40cirrobio/api-client/dist/models/ProjectAccessType.js#L22
+
+(defn s3-token-ds
+  "Short-lived AWS credentials ({:accessKeyId :secretAccessKey :sessionToken
+   :expiration}) scoped to reading dataset-id's files, via the
+   PROJECT_DOWNLOAD access type (ProjectFileAccessRequest/ProjectAccessType
+   in the Cirro OpenAPI spec -- unverified against the live API, it's the
+   current best guess after DATASET_UPLOAD and an sftp token both failed,
+   see comments above; if this 403s, that's the first thing to re-check)."
+  [{:keys [project] :as db} dataset-id]
+  (api-post db (u/tx "/api/projects/{{project}}/s3-token")
+                  {:accessType "PROJECT_DOWNLOAD"
+                   :datasetId dataset-id}))
+
+;;; Cirro's /api/info/system doesn't surface an S3 region separately from
+;;; Cognito's -- same fallback cirro.clj's own ingest-sheet-file uses
+;;; (cognito-region there, private to that ns, so re-derived here rather
+;;; than exposed).
+(defn s3-region
+  [db]
+  ;; At least with the project I am testing with it, files are not in the system region (us-east-1) but in us-west-2
+  (or #_ (:region (cirro-system-info db))
+      "us-west-2"))
+
+;;; Same shape as cirro.clj's private s3-client -- reified rather than
+;;; aws-creds/basic-credentials-provider because that silently drops
+;;; :session-token, and s3-token-ds vends short-lived STS creds (ASIA-
+;;; prefixed access keys) that AWS rejects outright without one.
+(defn- s3-client
+  [{:keys [accessKeyId secretAccessKey sessionToken]} region]
+  (aws/client {:api :s3
+               :region region
+               :credentials-provider
+               (reify aws-creds/CredentialsProvider
+                 (fetch [_]
+                   {:aws/access-key-id     accessKeyId
+                    :aws/secret-access-key secretAccessKey
+                    :aws/session-token     sessionToken}))}))
+
+(defn- domain->bucket+prefix
+  "\"s3://bucket/some/prefix\" -> [\"bucket\" \"some/prefix\"]. get-dataset-files'
+   :domain is the s3:// base every :files entry's :path is relative to."
+  [domain]
+  (let [[bucket & prefix-parts] (-> domain (str/replace #"^s3://" "") (str/split #"/"))]
+    [bucket (str/join "/" prefix-parts)]))
+
+(defn download-file
+  "Downloads dataset-id's file at `path` (one of get-dataset-files' :files
+   entries' own :path, eg \"data/clinical_data.csv\") to local file `dest`.
+   Fetches a fresh PROJECT_DOWNLOAD-scoped S3 token per call (s3-token-ds's
+   creds are short-lived, not meant to be cached/reused across calls -- same
+   as cirro.clj's upload-side s3-token). Returns dest."
+  [db dataset-id path dest]
+  (let [{:keys [domain]} (get-dataset-files db dataset-id)
+        [bucket prefix]  (domain->bucket+prefix domain)
+        key              (str prefix "/" path)
+        creds            (s3-token-ds db dataset-id)
+        s3               (s3-client creds (s3-region db))
+        result           (aws/invoke s3 {:op :GetObject
+                                          :request {:Bucket bucket :Key key}})]
+    (if (:cognitect.anomalies/category result)
+      (throw (ex-info (str "S3 GetObject failed: " (:cognitect.anomalies/message result "unknown error"))
+                      {:bucket bucket :key key :result result}))
+      (do (io/make-parents dest)
+          (with-open [in ^java.io.InputStream (:Body result)]
+            (io/copy in (io/file dest)))
+          dest))))
+
+(defn download-dataset
+  "Downloads every file in dataset-id into local directory `dest-dir`,
+   preserving each file's own relative :path underneath it. Returns the seq
+   of local dest paths."
+  [db dataset-id dest-dir]
+  (let [{:keys [files]} (get-dataset-files db dataset-id)]
+    (mapv (fn [{:keys [path]}]
+            (download-file db dataset-id path (str dest-dir "/" path)))
+          files)))
+
+(comment
+  (for [p (project-datasets ocra-db)] [(:id p) (:files (get-dataset-files ocra-db (:id p) ))])
+
+  (download-file ocra-db "5e2264e3-2700-4a01-8e96-69d37b6546f4"
+                 "data/patients.csv" "/tmp/ocra/patients.csv")
+
+  (download-dataset ocra-db "5e2264e3-2700-4a01-8e96-69d37b6546f4" "/tmp/ocra"))
+
+
 
