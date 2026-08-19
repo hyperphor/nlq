@@ -42,5 +42,6 @@ methods, availability charts — all genuinely application-specific, not part of
 0.1.0 factored out of okc
 0.2.0 schema inference
 0.3.0 postgres support
+0.3.1 bump com.hyperphor/way pin to 0.2.6 (config boot-log secret redaction)
 
 
