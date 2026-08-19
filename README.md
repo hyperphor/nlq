@@ -43,5 +43,6 @@ methods, availability charts — all genuinely application-specific, not part of
 0.2.0 schema inference
 0.3.0 postgres support
 0.3.1 bump com.hyperphor/way pin to 0.2.6 (config boot-log secret redaction)
+0.3.2 bump com.hyperphor/way pin to 0.2.7 (redact /api/config, the actual client-facing leak)
 
 
