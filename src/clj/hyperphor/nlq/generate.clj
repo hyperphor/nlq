@@ -1,11 +1,11 @@
+;;; A consuming app adds its own query types (eg :datomic) by extending the
+;;; `generate`/`run-query`/`example-queries` multimethods with its own
+;;; defmethods for a new dispatch keyword — the same way
+;;; sources.bigquery/sources.cirro extend sources.sql's
+;;; `query`/`project-tables` multimethods.
 (ns hyperphor.nlq.generate
-  "NL -> query -> results, for :sql and :sparql query types. A consuming app
-   adds its own query types (eg :datomic) by extending the `generate`/
-   `run-query`/`example-queries` multimethods with its own defmethods for a
-   new dispatch keyword — the same way sources.bigquery/sources.cirro extend
-   sources.sql's `query`/`project-tables` multimethods. Nothing here has a
-   hard dependency on any one query type beyond :sql/:sparql.
-"
+  "NL -> query -> results, for :sql and :sparql query types. Nothing here
+   has a hard dependency on any one query type beyond those two."
   (:require [hyperphor.multitool.core :as u]
             [hyperphor.multitool.cljcore :as ju]
             [hyperphor.ellum.core :as llm]
@@ -61,9 +61,7 @@
 
 (defn llm-complete
   "Call the LLM and return the assistant text. `max-tokens` defaults to 2000
-   (plenty for a SQL/SPARQL query, this ns's usual caller) -- callers whose
-   expected response is bigger (eg infer.clj's synthesized-schema EDN)
-   should pass their own."
+   (plenty for a SQL/SPARQL query) — pass your own for a bigger expected response."
   [messages & {:keys [model provider system max-tokens] :or {max-tokens 2000}}]
   (let [provider (or provider (get-in *project-conf* [:llm :provider]) :openai)
         model    (or model    (get-in *project-conf* [:llm :model])    "gpt-4o")
@@ -83,14 +81,13 @@
 
 ;;; ── Schema resolution ────────────────────────────────────────────────────────
 
+;;; The single source of truth for "the schema" everywhere in this ns —
+;;; generate :sql's prompt, project-ddl's enum injection, and endpoint's
+;;; columns-info annotation all reuse this exact value rather than each
+;;; resolving their own.
 (defn alz-schema
   "The current project's own Alzabo schema, or nil if it doesn't declare one
-   (:schema is optional — a project with no hand-authored schema still works,
-   just without the Alzabo-schema/semantic-column context in the prompt/UI).
-   The single source of truth for \"the schema\" everywhere in this ns —
-   generate :sql's prompt, project-ddl's enum injection, and endpoint's
-   columns-info annotation all reuse this exact value rather than each
-   resolving their own."
+   (:schema is optional)."
   []
   (when (:schema *project-conf*)
     (schema/read-schema (:schema *project-conf*))))
@@ -98,9 +95,7 @@
 ;;; ── Generation multimethods ──────────────────────────────────────────────────
 
 (defmulti generate
-  "Translate a natural-language query to code. Returns [type code text] where
-   code is the parsed/extracted result and text is any non-code surrounding
-   text."
+  "Translate a natural-language query to code. Returns [type code text]."
   (fn [query-type _nl] query-type))
 
 (defmethod generate :sql [_ nl]
@@ -268,16 +263,15 @@
   [{:keys [bq-project bq-dataset bq-table]}]
   (bq/table-named (bq/dataset-named bq-project bq-dataset) bq-table))
 
+;;; Vis-query response-objects carry :viz-spec/:viz-text instead of
+;;; :query/:text/:results — normalized onto the same log columns below
+;;; rather than adding vis-only ones. :user_reason carries "viz" for those
+;;; rows (or an explicit :user-reason from response-object), so they're
+;;; distinguishable from regular NL->query rows without splitting :project.
 (defn record
   "Log an NLQ or vis-query response to BigQuery, if a log target is
    configured (see `log-target`) — a silent no-op otherwise. `llm-call` is
-   the map captured by `llm-complete` via `*last-llm-call*` (nil for canned
-   queries, which never call the LLM). Vis-query response-objects carry
-   :viz-spec/:viz-text instead of :query/:text/:results — normalize those
-   onto the same log columns rather than adding vis-only columns.
-   :user_reason carries \"viz\" for those rows, or an explicit :user-reason
-   from response-object, so they're distinguishable from regular NL->query
-   rows without splitting :project."
+   the map `llm-complete` captured via `*last-llm-call*` (nil for canned queries)."
   [project response-object & [llm-call]]
   (when-let [{:keys [bq-project] :as target} (log-target)]
     (let [{:keys [nl query text results error viz-spec viz-text user-reason]} response-object

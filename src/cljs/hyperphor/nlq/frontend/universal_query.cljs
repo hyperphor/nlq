@@ -7,15 +7,12 @@
             [hyperphor.way.web-utils :as hwu]
             [hyperphor.nlq.frontend.sql-query :as sql-query]))
 
+;;; Excludes auxiliary entries like "Vegalite" (LLM config/examples for viz
+;;; generation, not a queryable project) and :sparql-provider entries — this
+;;; UI always queries via sql-query/ui's :sql qbox id, which would throw for
+;;; a :sparql provider; that gets its own tab (see frontend.sparql-query).
 (defn queryable-projects
-  "Names of :nlq config entries backed by a real, queryable SQL data source
-   (has a :db) — excludes auxiliary entries like \"Vegalite\", which exists
-   only to hold LLM config/examples for visualization generation, not a
-   project with its own tables to query. Also excludes :sparql-provider
-   entries — this UI always queries via sql-query/ui's :sql qbox id, which
-   routes through sql/project-ddl and friends; those have no :sparql
-   provider method and would throw if selected here. A :sparql project
-   should get its own dedicated tab (see frontend.sparql-query) instead."
+  "Names of :nlq config entries backed by a real, queryable SQL data source (has a :db)."
   []
   (->> (config/config :nlq)
        (filter :db)

@@ -1,20 +1,14 @@
+;;; Result is a semantic model of the data (kinds/fields/types/docs), not yet
+;;; wired up to any SQL backend -- it doesn't presume the kind_field naming
+;;; convention schema.clj's semantic-column layer relies on (real CSV
+;;; headers are whatever the data source calls them, eg camelCase). Loading
+;;; the inferred schema into a project that queries these tables via
+;;; sources.sql would still need the tables/columns actually renamed (or a
+;;; backend that maps between the two) to line up with schema/db-col -- not
+;;; attempted here.
 (ns hyperphor.nlq.infer
-  "Schema *inference* -- the reverse of schema.clj's read-schema (which
-   assumes an Alzabo schema already exists): read a set of tabular files
-   (CSV, from a directory -- could come from anywhere), take each one's
-   table name, columns, a few rows of sample data, and small-cardinality
-   columns' actual distinct values, and feed all of that plus a worked
-   example schema to an LLM, asking it to synthesize a new custom Alzabo
-   schema to represent the dataset.
-
-   The result is a semantic model of the data (kinds/fields/types/docs), not
-   yet wired up to any SQL backend -- it doesn't presume the kind_field
-   naming convention schema.clj's semantic-column layer relies on (real CSV
-   headers are whatever the data source calls them, eg camelCase). Loading
-   the inferred schema into a project that queries these tables via
-   sources.sql would still need the tables/columns actually renamed (or a
-   backend that maps between the two) to line up with schema/db-col -- not
-   attempted here."
+  "Schema *inference*: read a directory of tabular files (CSV) and feed their
+   columns/sample rows/enum-candidates to an LLM to synthesize a new Alzabo schema."
   (:require [clojure.data.csv :as csv]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -32,18 +26,13 @@
       (str/replace #"[_\s]+" "-")
       str/lower-case))
 
+;;; column-values overflowing `max-distinct` are dropped from the map
+;;; entirely -- not a realistic enum candidate, and `n` sample rows alone
+;;; usually can't tell a closed-set categorical column from a free-text one.
 (defn- read-csv-summary
-  "One pass over `file` (whole file read into memory -- fine for the
-   sample-dataset sizes this is meant for, not intended for huge tables):
-   [header sample-rows column-values].
-     sample-rows   - the first `n` data rows, for the prompt's row examples.
-     column-values - column -> a sorted vec of its distinct values across
-                     the *whole* file, but only for columns whose distinct
-                     count stays within `max-distinct` (a column that
-                     overflows that cap is dropped from the map entirely --
-                     it's not a realistic enum candidate, and `n` sample
-                     rows alone usually can't tell a closed-set categorical
-                     column from a free-text one)."
+  "One pass over `file` (whole file read into memory -- fine for sample-
+   dataset sizes, not huge tables). Returns [header sample-rows column-values],
+   column-values being column -> its distinct values if within `max-distinct`."
   [file n max-distinct]
   (with-open [r (io/reader file)]
     (let [[header & rows] (csv/read-csv r)
@@ -65,12 +54,8 @@
 
 (defn describe-table
   "One tabular file -> {:table-name :file :columns :sample-rows
-   :column-values}, ready for the schema-inference prompt. :table-name is a
-   kebab-cased keyword derived from the file's basename; :columns keeps each
-   column's own header text verbatim (that's the real name the inferred
-   schema's :doc should call out when it renames something); :column-values
-   is the small-cardinality-column summary from read-csv-summary, for
-   spotting :enums candidates sample rows alone would miss."
+   :column-values}, ready for the schema-inference prompt. :columns keeps
+   each column's own header text verbatim, for :doc to reference by name."
   [file & {:keys [sample-rows max-distinct-values] :or {sample-rows 5 max-distinct-values 20}}]
   (let [f (io/file file)
         [header rows column-values] (read-csv-summary f sample-rows max-distinct-values)]
@@ -152,12 +137,12 @@
    Return ONLY the schema as a single EDN code block (```clojure ... ```),
    nothing else outside the block.")
 
+;;; Deliberately generic -- a made-up bookstore domain, not tied to any real
+;;; project -- just enough surface to show :kinds/:fields/:type/:doc/
+;;; :cardinality/:unique, a cross-kind reference (:book's :author field), and :enums.
 (def example-schema
   "A small worked example of the format above, given to the LLM as a guide
-   for infer-schema's output shape. Deliberately generic -- a made-up
-   bookstore domain, not tied to any real project -- just enough surface to
-   show :kinds/:fields/:type/:doc/:cardinality/:unique, a cross-kind
-   reference (:book's :author field), and :enums."
+   for infer-schema's output shape."
   '{:title "Bookstore example"
     :kinds
     {:book
@@ -180,30 +165,21 @@
 
 ;;; ── Inference ─────────────────────────────────────────────────────────────────
 
+;;; Throws if the LLM's response had no parseable EDN code block (eg
+;;; truncation at `max-tokens` -- an unterminated code fence just looks like
+;;; "no code block" to extract-clojure, so a nil-body ex-info here on a
+;;; big/wide dataset is a good first thing to suspect, not necessarily a bad
+;;; prompt). `max-tokens` defaults to 4000 (generate's usual 2000 doubled)
+;;; since a several-table schema's EDN output is easily 1500+ tokens.
+;;; Doesn't validate or write anything -- run the result through alzabo's
+;;; own schema validation, or `spit` it to a .alz.edn file, once happy with
+;;; it; still worth a human pass over every kind's field list against
+;;; describe-directory's :columns, since an LLM can still drop or mistype a
+;;; column despite the prompt's explicit coverage requirement.
 (defn infer-schema
   "Ask an LLM to synthesize a new Alzabo schema describing the tabular
-   dataset in `dir` (every *.csv file there, non-recursive -- see
-   describe-directory). Returns the parsed schema as a Clojure map; throws
-   if the LLM's response had no parseable EDN code block (eg truncation at
-   `max-tokens` -- an unterminated code fence just looks like \"no code
-   block\" to extract-clojure, so a nil-body ex-info here on a big/wide
-   dataset is a good first thing to suspect, not necessarily a bad prompt).
-
-   Doesn't validate or write anything -- run the result through alzabo's own
-   schema validation, or `spit` it out to a .alz.edn file, once you're happy
-   with it. In particular, still worth a human pass over every kind's field
-   list against describe-directory's :columns before trusting it -- an LLM
-   can still drop or mistype a column despite the prompt's explicit
-   coverage requirement.
-
-   `title`, if given, is passed through as a hint for the schema's own
-   :title. `sample-rows` (default 5) and `max-distinct-values` (default 20)
-   thread to describe-directory. `max-tokens` (default 4000) is generate's
-   usual 2000 doubled -- a several-table schema's EDN output is easily
-   1500+ tokens, and a silently-truncated response just fails opaquely (see
-   above), so this defaults higher rather than requiring every caller to
-   remember to raise it. `provider`/`model` override generate/llm-complete's
-   defaults (see there) -- eg for a bigger-context model on a wide dataset."
+   dataset in `dir` (every *.csv file there, non-recursive). Returns the
+   parsed schema as a Clojure map."
   [dir & {:keys [title sample-rows max-distinct-values provider model max-tokens]
           :or {sample-rows 5 max-distinct-values 20 max-tokens 4000}}]
   (let [tables (describe-directory dir :sample-rows sample-rows :max-distinct-values max-distinct-values)

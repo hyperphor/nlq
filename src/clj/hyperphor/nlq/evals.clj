@@ -1,13 +1,10 @@
+;;; Cases are {:nl ... :results {...}}, optionally with an :expected
+;;; canonical query to compare against — :datomic-style query types do via
+;;; α-equivalence (see `queries-equivalent?`); :sql/:sparql don't, since two
+;;; query strings can be semantically identical and textually unrecognizable.
 (ns hyperphor.nlq.evals
-  "Eval harness for NL->query generation quality — feed it a seq of
-   {:nl ... :results {...}} cases (optionally with an :expected canonical
-   query, for query types that have one to compare against — :datomic-style
-   query types do via α-equivalence, see `queries-equivalent?`; :sql/:sparql
-   don't, since two query strings can be semantically identical and
-   textually unrecognizable) and it runs each against a real project,
-   scoring on whether the query ran without error and its results matched
-   the case's :results spec.
-"
+  "Eval harness for NL->query generation quality — runs eval cases against a
+   real project, scoring on whether the query ran and its results matched."
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
             [hyperphor.nlq.generate :as generate]
@@ -60,14 +57,8 @@
 ;;; ── Result checking ────────────────────────────────────────────────────────
 
 (defn check-results
-  "Check actual results against an expected result spec map.
-   Supported keys:
-     :count      – exact result count
-     :min-count  – minimum result count
-     :max-count  – maximum result count
-     :not-empty  – results must be non-empty
-
-   Returns {:pass? bool :failures [...]}"
+  "Check `actual` results against `expected`'s :count/:min-count/:max-count/
+   :not-empty spec. Returns {:pass? bool :failures [...]}."
   [expected actual]
   (if (nil? expected)
     {:pass? true :skipped true}
@@ -88,51 +79,33 @@
 
 ;;; ── Single eval runner ─────────────────────────────────────────────────────
 
+;;; :sql/:sparql (and any other type using llm-util/extract-code) return
+;;; [type code text]; a :datomic-style extension using extract-clojure
+;;; instead returns [code text] already, so it's handled specially below.
 (defn- generate-for-eval
   "Call `generate/generate` for `query-type`, normalizing its return shape to
-   [code text]. :sql/:sparql (and any other type using llm-util/extract-code)
-   return [type code text]; a :datomic-style extension using extract-clojure
-   instead returns [code text] already — handle that one specially, anything
-   else defaults to the extract-code shape."
+   [code text]."
   [query-type nl]
   (if (= query-type :datomic)
     (generate/generate :datomic nl)
     (let [[_type code text] (generate/generate query-type nl)]
       [code text])))
 
+;;; `project` binds generate/*project-conf* to that nlq-config entry for the
+;;; call's duration — required for :sql/:sparql (generation and running the
+;;; query both need the project's DB/schema). `provider`/`model` override
+;;; the project's configured LLM, for cross-model comparisons (see
+;;; `cross-check`). Only query types with a canonical comparable form (the
+;;; α-equivalence section above) get a :query-match? check against an
+;;; :expected query; :sql/:sparql just run the generated query and check
+;;; the case's :results spec. Also logs the run via `generate/record` (a
+;;; no-op unless a log target is configured), with the case's :tests
+;;; description (if any) carried in the log's :user_reason column so eval
+;;; rows are distinguishable there.
 (defn run-eval
-  "Run a single eval case. `query-type` defaults to :sql.
-
-   `project` binds generate/*project-conf* to that nlq-config entry for the
-   duration of the call — required for :sql/:sparql (generation needs the
-   project's DB/schema, and running the query needs it too). `provider`/
-   `model` override the project's configured LLM, for cross-model
-   comparisons (see `cross-check`).
-
-   Only query types with a canonical comparable form (see the α-equivalence
-   section above) get a :query-match? check against an :expected query in
-   the case map; anything else (:sql/:sparql) just runs the generated query
-   and checks the case's :results spec.
-
-   Returns a result map with keys:
-     :nl            – the natural-language query
-     :query-type    – as passed in
-     :expected      – the case's expected canonical query, if the type supports one
-     :generated     – the query the LLM produced (or nil on failure)
-     :gen-error     – error message if the API call threw
-     :parse-error   – error message if the response had no parseable code block
-     :run-error     – error message if running the query threw
-     :query-match?  – true/false/nil (nil = no expected query to compare, or no canonical form)
-     :result-check  – {:pass? bool :failures [...]}
-     :result-count  – count of actual results (or nil on error)
-     :pass?         – overall pass/fail
-     :elapsed-ms    - time
-
-   Also logs the run via `generate/record` (a no-op unless a log target is
-   configured, see generate.clj), same as a real endpoint call, with the
-   case's :tests description (if any) carried in the log's :user_reason
-   column so eval rows are distinguishable there.
-  "
+  "Run a single eval case (`query-type` defaults to :sql). Returns a result
+   map: :nl :query-type :expected :generated :gen-error :parse-error
+   :run-error :query-match? :result-check :result-count :pass? :elapsed-ms."
   [{:keys [nl expected results tests]}
    & {:keys [query-type project provider model]
       :or {query-type :sql}}]
@@ -215,14 +188,8 @@
 ;;; ── Batch runner ───────────────────────────────────────────────────────────
 
 (defn run-evals
-  "Run eval cases and print a summary report. Returns the result seq.
-
-   Options (all optional, thread down to `run-eval`):
-     :eval-cases – which cases to run (required — no default set ships here,
-                   bring your own per-project cases)
-     :query-type – :sql (default), :sparql, or a consumer-defined type
-     :project    – project name; required for :sql/:sparql
-     :provider / :model – override the project's configured LLM"
+  "Run `:eval-cases` (required, no default set ships here) via `run-eval`
+   and print a summary report. Returns the result seq."
   [& {:keys [eval-cases query-type project provider model]
       :or {query-type :sql}}]
   (println (str "\n=== NLQ Eval Run — " (count eval-cases) " cases, " (name query-type)
@@ -254,19 +221,9 @@
   (str (some-> provider name) "/" model))
 
 (defn cross-check
-  "Run the same `eval-cases` against each of `configs`, and print a pass/fail
-   matrix so results are directly comparable. Each config is a map like
-   {:provider :openai :model \"gpt-4o\"} — either key may be omitted to fall
-   back to the project's configured LLM.
-
-   Options:
-     :eval-cases – which cases to run (required)
-     :configs    – seq of {:provider :model} maps to compare
-                   (default: gpt-4o vs gpt-4o-mini on openai)
-     :query-type – :sql (default), :sparql, or a consumer-defined type
-     :project    – project name; required for :sql/:sparql
-
-   Returns a seq of {:provider :model :results [...]}, one per config."
+  "Run `eval-cases` against each of `configs` ({:provider :model} maps,
+   either key optional, falling back to the project's LLM) and print a
+   pass/fail matrix. Returns a seq of {:provider :model :results [...]}."
   [& {:keys [eval-cases configs query-type project]
       :or {query-type :sql
            configs [{:provider :openai :model "gpt-4o"}
@@ -296,10 +253,8 @@
     col-results))
 
 (defn print-diff
-  "Pretty-print a result's generated query. Results with an :expected
-   canonical query show a canonicalized diff against it; results without one
-   (:sql/:sparql — no canonical form, see `run-eval`) just print the
-   generated query as-is."
+  "Pretty-print a result's generated query — a canonicalized diff against
+   :expected if it has one, otherwise the generated query as-is."
   [{:keys [nl expected generated]}]
   (println "NL:       " nl)
   (if (nil? expected)

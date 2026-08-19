@@ -192,10 +192,8 @@
   (device-code-flow db))
 
 (defn get-access-token
-  "Returns a valid Cirro access token for db's tenant. Checks in order:
-   client credentials (CIRRO_CLIENT_ID + CIRRO_CLIENT_SECRET),
-   user/password (CIRRO_USERNAME + CIRRO_PASSWORD),
-   or a token previously obtained via (authenticate! db)."
+  "Returns a valid Cirro access token for db's tenant — client credentials,
+   user/password, or a token previously obtained via (authenticate! db), in that order."
   [{:keys [host auth] :as db}]
   (let [cache (get @token-cache host)]
     (when (or (nil? cache)
@@ -350,24 +348,19 @@
 
 (defn- sheet-name->table-name
   "A default Cirro tableName: lowercased, non-identifier runs collapsed to
-   underscores. Cirro requires tableName/namespaceName to match
-   ^[a-zA-Z_][a-zA-Z0-9_]{0,127}$ — real display names (eg \"pici0002 KRAS
-   measurement set\") don't."
+   underscores, matching Cirro's ^[a-zA-Z_][a-zA-Z0-9_]{0,127}$ requirement."
   [s]
   (-> s str/lower-case (str/replace #"[^a-zA-Z0-9_]+" "_")))
 
+;;; sheetCreationMode is SCRATCH, since rows arrive over the API rather than
+;;; a file upload — worth noting every real sheet in this tenant so far
+;;; (checked live via project-sheets) was created FILE-mode instead, so this
+;;; is less-trodden ground on Cirro's side.
 (defn create-sheet
   "Create a new TABLE sheet in db's Cirro project, ready for rows via
-   insert-sheet-rows. `columns` is a seq of {:name :type}, :type one of
-   Cirro's ColumnDataType values (:string :integer :bigint :float :double
-   :boolean :date :timestamp, case-insensitive) — the same {:name :type}
-   shape sql/project-tables already returns for existing sheets. `table-name`
-   defaults to a slugged `sheet-name` (see sheet-name->table-name).
-   sheetCreationMode is SCRATCH, since rows arrive over the API rather than
-   a file upload — worth noting every real sheet in this tenant so far
-   (checked live via project-sheets) was created FILE-mode instead, so this
-   is less-trodden ground on Cirro's side.
-   Returns {:id :message} (the new sheet's id, per CreateResponse)."
+   insert-sheet-rows. `columns` is a seq of {:name :type} (:type one of
+   Cirro's ColumnDataType values, case-insensitive), same shape sql/
+   project-tables returns for existing sheets. Returns {:id :message}."
   [{:keys [project] :as db} sheet-name columns & [table-name description]]
   (api-post db (u/tx "/api/projects/{{project}}/sheets")
             {:sheetType "TABLE"
@@ -381,28 +374,28 @@
                              columns)}))
 
 (defn list-sheet-jobs
-  "The SheetJob history for `sheet-id` — includes status/failedAtStep/
-   errorMessage for ingest jobs, which insert-sheet-rows' own response
-   doesn't surface (it just gets a bare 500 InternalServerException back).
-   Diagnostic for insert failures: read-only, no new sheets/rows created."
+  "The SheetJob history for `sheet-id` (status/failedAtStep/errorMessage) —
+   diagnostic for insert failures, since insert-sheet-rows' own response
+   just gets a bare 500 InternalServerException back. Read-only."
   [{:keys [project] :as db} sheet-id]
   (api-get db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}/jobs") {}))
 
+;;; Checked live against Cirro's dev tenant: the exact same batch (same
+;;; sheet, same rows) fails an InternalServerException 500 on one attempt
+;;; and succeeds outright on the next, with no correlation found to batch
+;;; size (1 row through 1000), content, or sheet freshness — bisected all
+;;; three dimensions live and ruled each out. Genuine intermittent server-
+;;; side flakiness; the bad window can last minutes (3 immediate retries at
+;;; 2s spacing all failed once, then the identical batch succeeded
+;;; unprompted minutes later), so this retry only reduces the odds of
+;;; hitting it, not eliminates them — a 170k-row/171-batch upload still
+;;; failed after all 3 retries on one batch in testing. Not worth chasing
+;;; further: nothing in this export needs more than ~24 batches (see
+;;; cirro_import.clj), well under where every observed failure has landed
+;;; (54-61 batches in).
 (defn- insert-batch
-  "POST one batch, retrying on failure — checked live against Cirro's dev
-   tenant: the exact same batch (same sheet, same rows) fails an
-   InternalServerException 500 on one attempt and succeeds outright on the
-   next, with no correlation found to batch size (1 row through 1000),
-   content, or whether the sheet was brand-new or already had thousands of
-   rows in it — bisected all three dimensions live and ruled each out.
-   Genuine intermittent server-side flakiness. The bad window can last
-   minutes (checked live: 3 immediate retries at 2s spacing all failed on
-   one batch, then the identical batch succeeded unprompted minutes later),
-   so this retry only reduces the odds of hitting it, it doesn't eliminate
-   them — a 170k-row/171-batch upload still failed after all 3 retries on
-   one batch in testing. Not worth chasing further: nothing in this export
-   actually needs more than ~24 batches (see cirro_import.clj), well under
-   where every observed failure has landed (54-61 batches in)."
+  "POST one batch, retrying up to 3x on failure (see intermittent Cirro
+   server flakiness noted above)."
   [{:keys [project] :as db} sheet-id batch]
   (loop [attempt 1]
     (let [result (try
@@ -419,15 +412,13 @@
                             (recur (inc attempt)))
         :else           (throw (:error result))))))
 
+;;; If a batch still fails after retries, rethrows with :rows-inserted added
+;;; to ex-data so the caller knows how much already landed and can resume
+;;; from there, instead of a bare exception that discards that count and
+;;; forces re-querying the sheet's totalRowCount.
 (defn insert-sheet-rows
-  "Insert `rows` (a seq of maps, column name -> value) into `sheet-id` in
-   db's project. Batches into groups of 1000 — Cirro's insertSheetData caps
-   at 1000 inserts per call — retrying each batch up to 3 times (see
-   insert-batch) before giving up, and returns the total rowsAffected.
-   If a batch still fails after retries, rethrows with :rows-inserted added
-   to ex-data so the caller knows how much already landed and can resume
-   from there, instead of a bare exception that discards that count and
-   forces re-querying the sheet's totalRowCount."
+  "Insert `rows` (a seq of maps, column name -> value) into `sheet-id`,
+   batched into groups of 1000 (Cirro's insertSheetData cap). Returns total rowsAffected."
   [{:keys [project] :as db} sheet-id rows]
   (loop [batches (partition-all 1000 rows), inserted 0]
     (if (empty? batches)
@@ -464,42 +455,43 @@
 
 (defn s3-token
   "Short-lived AWS credentials ({:accessKeyId :secretAccessKey :sessionToken
-   :expiration}) scoped to uploading a file destined for sheet-id, via the
-   SHEET_UPLOAD access type (ProjectFileAccessRequest/ProjectAccessType in
-   the Cirro OpenAPI spec)."
+   :expiration}) scoped to uploading a file destined for sheet-id (SHEET_UPLOAD access type)."
   [{:keys [project] :as db} sheet-id]
   (api-post db (u/tx "/api/projects/{{project}}/s3-token")
             {:accessType "SHEET_UPLOAD"
              :sheetId sheet-id}))
 
+;;; The bucket half is confirmed live (checked against a real dataset-
+;;; manifest :domain in the PRINCE-PICI tenant: project-<projectId>, exact
+;;; match). The /data/ segment in the key is still inferred rather than
+;;; confirmed — by analogy with the Python SDK's FileAccessContext/
+;;; upload_dataset, which explicitly writes datasets under <domain>/data/...
+;;; (distinct from the bare domain s3://project-<id>/datasets/<id> that
+;;; read/manifest contexts use) — a first guess without it (bare
+;;; sheets/<sheetId>/<filename>) got a live AccessDenied despite the bucket
+;;; being right, consistent with the write scope actually being
+;;; sheets/<sheetId>/data/*. See design/cirro-file-upload.md.
 (defn- sheet-upload-location
-  "{:bucket :key} to PUT a sheet-upload file at. The bucket half is confirmed
-   live (checked against a real dataset-manifest :domain in the PRINCE-PICI
-   tenant: project-<projectId>, exact match). The /data/ segment in the key
-   is still inferred rather than confirmed — by analogy with the Python SDK's
-   FileAccessContext/upload_dataset, which explicitly writes datasets under
-   <domain>/data/... (distinct from the bare domain
-   s3://project-<id>/datasets/<id> that read/manifest contexts use) — a first
-   guess without it (bare sheets/<sheetId>/<filename>) got a live AccessDenied
-   despite the bucket being right, consistent with the write scope actually
-   being sheets/<sheetId>/data/*. See design/cirro-file-upload.md."
+  "{:bucket :key} to PUT a sheet-upload file at."
   [{:keys [project]} sheet-id filename]
   {:bucket (str "project-" project)
    :key    (u/tx "sheets/{{sheet-id}}/data/{{filename}}")})
 
+;;; aws-creds/basic-credentials-provider won't do here: checked live (and
+;;; against aws-api 0.8.838's own source), it only ever forwards
+;;; :access-key-id/:secret-access-key to the signer, silently dropping
+;;; :session-token even when given one. That's fine for permanent IAM keys,
+;;; but s3-token vends short-lived STS creds (ASIA-prefixed access keys)
+;;; which AWS rejects outright as an unrecognized access key id — not a
+;;; permissions error, InvalidAccessKeyId — on every signed request missing
+;;; their paired session token. Reifying CredentialsProvider directly
+;;; instead, per its own docstring listing :aws/session-token as an
+;;; explicit (optional) fetch key.
 (defn- s3-client
   "A fresh aws-api S3 client for one sheet-upload token — s3-token's creds
-   are short-lived (see its :expiration), so unlike get-access-token's cached
-   Cirro bearer token, this isn't meant to be reused across calls.
-   aws-creds/basic-credentials-provider won't do here: checked live (and
-   against aws-api 0.8.838's own source), it only ever forwards
-   :access-key-id/:secret-access-key to the signer, silently dropping
-   :session-token even when given one. That's fine for permanent IAM keys,
-   but s3-token vends short-lived STS creds (ASIA-prefixed access keys) which
-   AWS rejects outright as an unrecognized access key id — not a permissions
-   error, InvalidAccessKeyId — on every signed request missing their paired
-   session token. Reifying CredentialsProvider directly instead, per its own
-   docstring listing :aws/session-token as an explicit (optional) fetch key."
+   are short-lived, so unlike get-access-token's cached Cirro bearer token,
+   this isn't meant to be reused across calls. See comment above for why
+   this reifies CredentialsProvider directly."
   [{:keys [accessKeyId secretAccessKey sessionToken]} region]
   (aws/client {:api :s3
                :region region
@@ -511,11 +503,9 @@
                     :aws/session-token     sessionToken}))}))
 
 (defn- put-s3-file!
-  "PUTs local `file` to bucket/key via aws-api client s3. Single PUT, no
-   multipart — fine up to S3's 5GB limit, comfortably above anything this
-   pipeline produces (largest measurement-set format so far is ~190MB, see
-   design/cirro-file-upload.md). Throws on any :cognitect.anomalies/category
-   response (aws-api's own error signal)."
+  "PUTs local `file` to bucket/key via aws-api client s3 (single PUT, no
+   multipart — fine up to S3's 5GB limit). Throws on any
+   :cognitect.anomalies/category response."
   [s3 bucket key file]
   (let [result (aws/invoke s3 {:op :PutObject
                                :request {:Bucket bucket
@@ -526,13 +516,14 @@
                       {:bucket bucket :key key :result result})))
     result))
 
+;;; File column headers are matched against the sheet's own column names
+;;; (see SheetIngestRequest's :sourceColumns for an explicit mapping, not
+;;; used here since sheet-payload's cirro-identifier sanitization already
+;;; produces matching names).
 (defn trigger-ingest
   "Kicks off Cirro's async bulk ingest of an already-uploaded S3 file into
-   sheet-id. file-type is one of \"CSV\" \"PARQUET\" \"JSON\" \"XLSX\" — file
-   column headers are matched against the sheet's own column names (see
-   SheetIngestRequest's :sourceColumns for an explicit mapping, not used
-   here since sheet-payload's cirro-identifier sanitization already produces
-   matching names). Returns immediately (202) — see ingest-jobs/await-ingest."
+   sheet-id (file-type one of \"CSV\" \"PARQUET\" \"JSON\" \"XLSX\"). Returns
+   immediately (202) — see ingest-jobs/await-ingest."
   [{:keys [project] :as db} sheet-id file-type storage-uri]
   (api-post db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}/ingest")
             {:fileDef {:fileType file-type :storageUri storage-uri}}))
@@ -547,10 +538,8 @@
        reverse))
 
 (defn await-ingest
-  "Blocks until sheet-id's most recent INGEST job leaves PENDING/RUNNING/
-   STARTING, polling every poll-ms (default 5s) up to timeout-ms (default
-   10min). Returns the finished SheetJob; throws if it lands on anything but
-   COMPLETED, or if timeout-ms elapses first."
+  "Polls until sheet-id's most recent INGEST job leaves PENDING/RUNNING/
+   STARTING. Returns the finished SheetJob; throws on anything but COMPLETED, or on timeout."
   [db sheet-id & {:keys [poll-ms timeout-ms] :or {poll-ms 5000 timeout-ms 600000}}]
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop []
@@ -573,8 +562,6 @@
 (defn ingest-sheet-file
   "Bulk-loads local CSV `file` into sheet-id: PUTs it to S3 with a freshly
    vended SHEET_UPLOAD token, triggers ingest, and blocks until it completes.
-   The bulk alternative to insert-sheet-rows for sheets past a few thousand
-   rows — see this section's header comment and design/cirro-file-upload.md.
    Returns the completed SheetJob."
   [{:keys [project] :as db} sheet-id file]
   (let [creds  (s3-token db sheet-id)
@@ -660,13 +647,12 @@
 ;;; Having to guess at access type. See
 ;;; https://github.com/CirroBio/Cirro-components/blob/nlq-demo/node_modules/%40cirrobio/api-client/dist/models/ProjectAccessType.js#L22
 
+;;; PROJECT_DOWNLOAD is unverified against the live API -- it's the current
+;;; best guess after DATASET_UPLOAD and an sftp token both failed (see
+;;; comments above); if this 403s, that's the first thing to re-check.
 (defn s3-token-ds
   "Short-lived AWS credentials ({:accessKeyId :secretAccessKey :sessionToken
-   :expiration}) scoped to reading dataset-id's files, via the
-   PROJECT_DOWNLOAD access type (ProjectFileAccessRequest/ProjectAccessType
-   in the Cirro OpenAPI spec -- unverified against the live API, it's the
-   current best guess after DATASET_UPLOAD and an sftp token both failed,
-   see comments above; if this 403s, that's the first thing to re-check)."
+   :expiration}) scoped to reading dataset-id's files, via the PROJECT_DOWNLOAD access type."
   [{:keys [project] :as db} dataset-id]
   (api-post db (u/tx "/api/projects/{{project}}/s3-token")
                   {:accessType "PROJECT_DOWNLOAD"
@@ -706,10 +692,8 @@
 
 (defn download-file
   "Downloads dataset-id's file at `path` (one of get-dataset-files' :files
-   entries' own :path, eg \"data/clinical_data.csv\") to local file `dest`.
-   Fetches a fresh PROJECT_DOWNLOAD-scoped S3 token per call (s3-token-ds's
-   creds are short-lived, not meant to be cached/reused across calls -- same
-   as cirro.clj's upload-side s3-token). Returns dest."
+   entries' own :path) to local file `dest`, via a fresh PROJECT_DOWNLOAD-
+   scoped S3 token per call. Returns dest."
   [db dataset-id path dest]
   (let [{:keys [domain]} (get-dataset-files db dataset-id)
         [bucket prefix]  (domain->bucket+prefix domain)

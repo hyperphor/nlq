@@ -38,21 +38,28 @@
 
 ;;; ── DDL generation ───────────────────────────────────────────────────────────
 
+;;; Two conventions are checked, since different projects' schemas use
+;;; different ones: schemas that flatten several kinds' fields into shared
+;;; tables reverse-map a column back to [kind field] via the kind_field
+;;; naming convention (schema/sql->alz); schemas generated with one kind
+;;; per table (eg AACT, see hyperphor.nlq.sources.postgres/gen-alz-schema)
+;;; instead look up table-name/col directly as `schema`'s own kind/field.
 (defn alz-enum-type
-  "If col is recognized in `schema` as an enum field, return its DDL
-   enum type string (e.g. \"ENUM (female, male, unknown)\"); otherwise nil.
-   Overrides a backend's raw column type, since bare types like STRING lose
-   the enum values the LLM benefits from seeing — secret sauce for generation."
-  [schema col]
-  (when-let [[kind field] (schema/sql->alz schema col)]
-    (schema/enum-ddl-type schema kind field)))
+  "If table-name/col is recognized as an enum field, return its DDL enum
+   type string (e.g. \"ENUM (female, male, unknown)\"); otherwise nil —
+   overrides a backend's raw column type, since bare types like STRING lose
+   the enum values the LLM benefits from seeing."
+  [schema table-name col]
+  (or (when-let [[kind field] (schema/sql->alz schema col)]
+        (schema/enum-ddl-type schema kind field))
+      (schema/enum-ddl-type schema (keyword table-name) (keyword col))))
 
 (defn table-ddl
   [db schema table-name columns]
   (let [column-defs
         (apply str
                (map (fn [{col-name :name backend-type :type}]
-                      (let [type (or (alz-enum-type schema col-name) backend-type)
+                      (let [type (or (alz-enum-type schema table-name col-name) backend-type)
                             name (quote-ident db col-name)]
                         (u/tx "{{name}} {{type}},\n"))) ;has extra comma at end but don't think we care
                     columns))
@@ -63,11 +70,8 @@
 ")))
 
 (u/defn-memoized project-ddl
-  "Generate DDL for all of a project's tables, for use as LLM context. `db` is a
-   :db config map (from config.edn's :nlq entries), with :provider selecting the
-   backend. `schema` is that project's own Alzabo schema (for enum-type injection
-   via alz-enum-type) — pass whatever `generate`'s `alz-schema` already resolved,
-   not a separate/hardcoded one."
+  "Generate DDL for all of a project's tables, for use as LLM context. `schema`
+   is that project's own Alzabo schema, for enum-type injection via alz-enum-type."
   [db schema]
   (let [tables (project-tables db)
         selected-tables (if (:tables db)
@@ -84,29 +88,29 @@
 
 ;;; ── Single-entity lookup (for the object inspector) ─────────────────────────
 
+;;; Tries the kind_field id-column search FIRST, falling back to a same-
+;;; named-table short-circuit (for AACT-style one-kind-per-table schemas,
+;;; which have no kind_field id column to find) only when that search finds
+;;; nothing. Order matters: checking the short-circuit first would risk a
+;;; false-positive match against a kind_field project that happens to also
+;;; have a table literally named after some kind — trying the real
+;;; convention first means the fallback can only fire when that convention
+;;; has nothing to offer, so it can't change behavior for any project where
+;;; it currently works.
 (u/defn-memoized table-for-kind
   "The table containing `kind`'s own id column (eg subject_id for :subject).
-   Memoized like project-ddl, since project-tables is a live API call.
-   Assumes at most one table per project has that column. Schema-independent
-   — the kind_field naming convention (schema/db-col) needs only the kind's
-   name, not a full schema."
+   Assumes at most one table per project has that column."
   [db kind]
-  (let [id-col (schema/db-col kind :id)]
-    (->> (project-tables db)
-         (filter (fn [{:keys [columns]}] (some #(= (:name %) id-col) columns)))
-         first
-         :table-name)))
+  (let [tables (project-tables db)
+        id-col (schema/db-col kind :id)]
+    (or (->> tables
+             (filter (fn [{:keys [columns]}] (some #(= (:name %) id-col) columns)))
+             first
+             :table-name)
+        (some #(when (= (:table-name %) (name kind)) (:table-name %)) tables))))
 
 (defn sql-string-literal
-  "Safely quote `s` as a SQL string literal. `query`'s multimethods take a raw
-   SQL string with no bind-parameter API, so this is the injection defense
-   for a value (eg an inspector lookup's id) going into generated SQL text.
-   Real ids can contain all sorts of punctuation an allow-list won't
-   anticipate (eg a variant id like \"GRCh37:chr1:+:11889411:11889411/A/C\"),
-   so reject only what actually matters for this attack — a quote character
-   that would let the value break out of the string literal — rather than
-   restricting to a conservative charset that ends up blocking legitimate
-   values too."
+  "Safely quote `s` as a SQL string literal, with check againsat injection attacks."
   [s]
   (when (re-find #"['\"]" s)
     (throw (ex-info "Unsafe value for SQL literal" {:value s})))

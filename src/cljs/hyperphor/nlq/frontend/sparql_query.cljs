@@ -1,13 +1,13 @@
+;;; A trimmed sibling of sql_query.cljs's :sql UI, using the same generic
+;;; qbox/ui + /api/qbox/query plumbing (qbox id :sparql instead of :sql, see
+;;; handler.clj's qbox-endpoint). Deliberately does NOT reuse sql_query.cljs's
+;;; semantic-column grouping / click-to-inspect machinery -- both are keyed
+;;; off the SQL/Alzabo `kind_field` result-column naming convention
+;;; (schema/columns-info), which raw SPARQL variable bindings (?px,
+;;; ?pxLabel, ...) never match -- so results just render as a plain grid,
+;;; auto-columned from whatever the query's own SELECT vars were.
 (ns hyperphor.nlq.frontend.sparql-query
-  "NL->SPARQL query UI (experimental Wikidata demo, see design/sparql.md).
-   A trimmed sibling of sql_query.cljs's :sql UI, using the same generic
-   qbox/ui + /api/qbox/query plumbing with qbox id :sparql instead of :sql
-   (see handler.clj's qbox-endpoint). Deliberately does NOT reuse
-   sql_query.cljs's semantic-column grouping / click-to-inspect machinery --
-   both are keyed off the SQL/Alzabo `kind_field` result-column naming
-   convention (schema/columns-info), which raw SPARQL variable bindings
-   (?px, ?pxLabel, ...) never match -- so results just render as a plain
-   grid, auto-columned from whatever the query's own SELECT vars were."
+  "NL->SPARQL query UI (experimental Wikidata demo, see design/sparql.md)."
   (:require [reagent.core :as reagent]
             [re-frame.core :as rf]
             [clojure.string :as str]

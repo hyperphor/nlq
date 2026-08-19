@@ -1,8 +1,8 @@
+;;; Split out of nlq.generate so nlq.inspect (which needs it too, for the
+;;; :sql-inspect endpoint's project->db lookup) doesn't have to depend on
+;;; nlq.generate — which itself depends on nlq.inspect, for annotate-inspectable.
 (ns hyperphor.nlq.config
-  "Per-project NLQ config lookup. Split out of nlq.generate so nlq.inspect
-   (which needs it too, for the :sql-inspect endpoint's project->db lookup)
-   doesn't have to depend on nlq.generate — which itself depends on
-   nlq.inspect, for annotate-inspectable."
+  "Per-project NLQ config lookup."
   (:require [hyperphor.way.config :as config]))
 
 (defn projects

@@ -30,12 +30,9 @@
 ;;; "genes link to genecards.org") lives here — that's schema data.
 
 (defn external-link
-  "Generic external-link renderer, driven entirely by a column's
-   schema-supplied :external-link-template (eg
-   \"https://www.genecards.org/card/{{value}}\" on a :gene kind in a
-   cancer-genomics schema) — distinct styling (.ent-ext) from the in-app
-   object-inspector links (.ent), so it's visually clear a click leaves the
-   app rather than opening an entity in place."
+  "Generic external-link renderer, driven by a column's schema-supplied
+   :external-link-template. Distinct styling (.ent-ext) from in-app object-
+   inspector links (.ent), so it's visually clear a click leaves the app."
   [template value]
   [:a.ent-ext {:href (u/expand-template template {:value value} :allow-missing? true)
                :target "_ext"}
@@ -48,28 +45,20 @@
      [:span.ag-cell-wrap-text (external-link template (.-value params))])))
 
 (defn id-column?
-  "True for a group's own identifier column — via the Alzabo field (:field
-   :id, eg subject_id's own field on the :subject kind), or by name for
-   columns the schema didn't resolve. Foreign-key columns pointing at a kind
-   (eg clinical_observation_subject, whose :field is :subject not :id) don't
-   count — they're a reference to the group's kind, not its identifier."
+  "True for a group's own identifier column (Alzabo :field :id, or by name
+   for unresolved columns) — not a foreign key pointing at that kind."
   [col info]
   (or (= (:field info) :id)
       (str/ends-with? (name col) "_id")))
 
+;;; :inspectable? is set live by the backend (generate.clj's endpoint
+;;; calling inspect/annotate-inspectable) off the same table lookup the
+;;; inspector itself uses at click-time, since table coverage varies by
+;;; project and can grow over time — not something to hardcode here.
 (defn inspectable-kind
   "The kind this column's value identifies an entity of, if any — its own
-   :kind when this is that kind's own id column (eg subject_id identifies a
-   :subject), or its :ref-kind when this is a foreign key (eg
-   clinical_observation_subject's value is a subject id — the FK's value
-   always identifies the kind it references, regardless of the FK field's
-   own name). nil for everything else (most columns), including a kind that
-   doesn't actually have a queryable table in this project right now — see
-   :inspectable?, set live by the backend (generate.clj's endpoint calling
-   inspect/annotate-inspectable) off the same table lookup the inspector
-   itself uses at click-time, since table coverage varies by project and can
-   grow over time as more data gets migrated into SQL — not something to
-   hardcode here."
+   :kind for that kind's own id column, or its :ref-kind for a foreign key.
+   nil otherwise, including a kind with no queryable table right now."
   [col info]
   (when (:inspectable? info)
     (cond
@@ -87,41 +76,81 @@
                            (rf/dispatch [:sql-inspect project (name kind) (.-value params)]))}
        (str (.-value params))]])))
 
+(defn id-col-for-kind
+  "The column (in this result set) carrying kind's own id/FK value — needed
+   when a :label column (see label-inspect-cell-renderer) is clicked instead,
+   since the inspector always operates on the id. nil if no column in this
+   result actually resolved to kind's id/FK."
+  [kind columns-info]
+  (ffirst (filter (fn [[col info]] (= kind (inspectable-kind col info))) columns-info)))
+
+;;; Always an in-app link, even for a kind with an :external-link-template —
+;;; a study's title is how a user finds/recognizes it in-app; its id/FK
+;;; columns are what carry the external link instead (see column-def /
+;;; schema/column-info's :label? gating).
+(defn label-inspect-cell-renderer
+  "Like inspect-cell-renderer, but for a kind's :label field (not its
+   id/FK): shows the label's own value, using id-col (elsewhere in the same
+   row) for the inspector lookup."
+  [project kind id-col]
+  (fn [params]
+    (reagent/as-element
+     [:span.ag-cell-wrap-text
+      [:a.ent {:href "#"
+               :on-click (fn [e]
+                           (.preventDefault e)
+                           (rf/dispatch [:sql-inspect project (name kind)
+                                         (aget (.-data params) (name id-col))]))}
+       (str (.-value params))]])))
+
 (defn column-def
   [project col columns-info]
   (let [info  (get columns-info col)
         link-template (:external-link-template info)
         inspect-kind (inspectable-kind col info)
+        ;; A :label? column (eg studies' brief_title) isn't itself an id/FK
+        ;; — schema/column-info never puts an :external-link-template on it
+        ;; — but should still open its owning kind's inspector, driven off a
+        ;; sibling id/FK column in the same row rather than its own value.
+        ;; Only usable if this particular result set actually has that
+        ;; sibling id/FK column (id-col-for-kind can return nil — eg a query
+        ;; that selects a label field without also selecting its id, or
+        ;; whose kind has no queryable backing table right now): without a
+        ;; real id-col the click handler would dispatch a nil id, so treat
+        ;; this the same as "no renderer" rather than building a broken one.
+        label-kind (when (:label? info) (:kind info))
+        label-id-col (when label-kind (id-col-for-kind label-kind columns-info))
         icon  (:icon info)
         ;; A resolved column always sits under a group header naming its
         ;; :kind (see ag-column-defs), so the kind part of the raw column
         ;; name (eg subject_sex's "subject") is redundant there — show just
         ;; the field. Unresolved columns have no group header for context,
         ;; so keep the full raw name.
-        label (if-let [field (:field info)] (name field) (name col))]
+        label (if-let [field (:field info)] (name field) (name col))
+        renderer (cond
+                   link-template (external-link-renderer link-template)
+                   inspect-kind  (inspect-cell-renderer project inspect-kind)
+                   (and label-kind label-id-col)
+                   (label-inspect-cell-renderer project label-kind label-id-col))]
     (cond-> {:field col
              :headerName (str (when icon (str icon " ")) label)}
-      (:doc info)   (assoc :headerTooltip (:doc info))
-      link-template (assoc :cellRenderer (external-link-renderer link-template))
-      inspect-kind  (assoc :cellRenderer (inspect-cell-renderer project inspect-kind)))))
+      (:doc info) (assoc :headerTooltip (:doc info))
+      renderer    (assoc :cellRenderer renderer))))
 
 (defn column-group-key
-  "Columns with the same owning kind get the same key, so they can be grouped
-   together; a column with no resolved kind gets a key unique to itself, so
-   it neither merges with other unresolved columns nor moves from its
-   original position."
+  "Columns with the same owning kind share a key (to be grouped together); an
+   unresolved column gets a key unique to itself, so it doesn't merge or move."
   [col columns-info]
   (or (:kind (get columns-info col)) col))
 
+;;; A stable group-by, not a resort, so unrelated/unresolved columns stay
+;;; roughly where the query put them. `group-priority` is optional (eg a
+;;; project's own :column-group-priority config) — nil means natural
+;;; first-seen order, no domain-specific default baked in here.
 (defn column-groups
   "[[group-key members] ...] in final left-to-right order: `group-priority`
-   groups first (in that order, skipping any not present), then every other
-   group in the order it first appears — a stable group-by, not a resort, so
-   unrelated/unresolved columns stay roughly where the query put them. Within
-   a group, members are sorted id-first. `group-priority` is optional (eg a
-   project's own :column-group-priority config, a seq of kind keywords) —
-   nil just means natural first-seen order, no domain-specific default
-   baked in here."
+   groups first, then every other group in first-appearance order. Members
+   within a group are sorted id-first."
   [cols columns-info & [group-priority]]
   (let [group-key   (fn [col] (column-group-key col columns-info))
         groups      (group-by group-key cols)
@@ -136,16 +165,13 @@
   [kind]
   (some-> (name kind) (str/replace "-" " ") str/capitalize))
 
+;;; ag-grid only renders the expand/collapse toggle once some child is
+;;; marked :columnGroupShow "open" — without it a group header can't be
+;;; collapsed, hence marking every member but the first that way below.
 (defn ag-column-defs
-  "ag-grid columnDefs from `column-groups`: a real semantic-type group (even
-   a single-column one — the header alone is still informative) renders as an
-   ag-grid column group, a spanning header over its member columns, open by
-   default with an expand/collapse control — the group's first (id-first
-   sorted) column stays visible either way, the rest only show when expanded
-   (ag-grid only renders the toggle at all once some child is marked
-   :columnGroupShow \"open\"; without it a group header can't be collapsed).
-   A column with no resolved type — its \"group\" is just itself, per
-   `column-group-key` — renders as a plain top-level column, not wrapped."
+  "ag-grid columnDefs from `column-groups`: a real semantic-type group
+   renders as a spanning, collapsible ag-grid column group; a column with no
+   resolved type renders as a plain top-level column, not wrapped."
   [project cols columns-info & [group-priority]]
   (mapv (fn [[gk members]]
           (let [real-kind? (= gk (:kind (get columns-info (first members))))
@@ -201,11 +227,9 @@
      :external-link-template (:external-link-template info)}))
 
 (defn inspector-value-renderer
-  "Cell renderer for the inspector's Value column: a plain value normally, a
-   schema-driven external link (see `transpose-row`'s :external-link-template),
-   or an in-app drill-down link when this row's field identifies another
-   entity (see `transpose-row`'s :inspect-kind) — clicking the latter
-   re-inspects in place, same as clicking an id/FK cell in the main results grid."
+  "Cell renderer for the inspector's Value column: a plain value, a schema-
+   driven external link, or an in-app drill-down link (re-inspecting in
+   place) — see `transpose-row`'s :external-link-template/:inspect-kind."
   [project]
   (fn [params]
     (let [value (.-value params)
@@ -236,14 +260,12 @@
                                          {:field :value :headerName "Value"
                                           :cellRenderer (inspector-value-renderer project)}]})])
 
+;;; Must come from one of that kind's own (non-FK) columns — a column that
+;;; IS a foreign key carries the *referenced* kind's icon instead, so
+;;; matching on :kind alone without also requiring a nil :ref-kind could
+;;; show the wrong icon.
 (defn inspected-kind-icon
-  "The Alzabo :icon for the kind currently shown in the inspector, if any.
-   Must come from one of that kind's own (non-FK) columns — a column that
-   IS a foreign key (eg sample_subject on :sample) carries the *referenced*
-   kind's icon instead, not the owning kind's, so matching on :kind alone
-   without also requiring a nil :ref-kind could pick that up and show the
-   wrong icon (or the same icon regardless of which kind is actually being
-   displayed)."
+  "The Alzabo :icon for the kind currently shown in the inspector, if any."
   [kind columns-info]
   (some (fn [[_ info]] (when (and (= (:kind info) (keyword kind)) (nil? (:ref-kind info)))
                          (:icon info)))

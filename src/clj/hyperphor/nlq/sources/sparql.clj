@@ -1,10 +1,10 @@
+;;; Peer to sources.sql — NLQ's third query-type backend (see generate.clj's
+;;; :sparql methods) — but deliberately not built on sources.sql's provider
+;;; multimethods: those exist to share DDL/dialect machinery across SQL
+;;; backends, and SPARQL/RDF has no DDL or table structure to share with them.
 (ns hyperphor.nlq.sources.sparql
   "Execute SPARQL queries against a public SPARQL endpoint (Wikidata Query
-   Service by default). Peer to sources.sql — NLQ's third query-type backend
-   (see generate.clj's :sparql methods) — but deliberately not built on
-   sources.sql's provider multimethods: those exist to share DDL/dialect
-   machinery across SQL backends, and SPARQL/RDF has no DDL or table
-   structure to share with them."
+   Service by default)."
   (:require [hato.client :as client]
             [clojure.data.json :as json]
             [hyperphor.multitool.core :as u]))
@@ -43,9 +43,7 @@
 
 (defn query
   "Run `sparql-string` against `db`'s SPARQL endpoint (default Wikidata's).
-   Returns a seq of maps, keyed by the query's own SELECT variables — same
-   shape sql/query and datomic query results already take, so nothing
-   downstream in generate.clj needs to know the difference."
+   Returns a seq of maps keyed by the query's own SELECT variables, same shape as sql/query."
   [db sparql-string]
   (let [url (or (:endpoint db) default-endpoint)
         resp (client/get url

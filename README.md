@@ -36,3 +36,11 @@ follow-on.
 
 CANDEL import/export, Cirro sheet-upload ETL, Google Cloud Storage glue, per-project data
 methods, availability charts — all genuinely application-specific, not part of the query engine.
+
+# Version History
+
+0.1.0 factored out of okc
+0.2.0 schema inference
+0.3.0 postgres support
+
+
