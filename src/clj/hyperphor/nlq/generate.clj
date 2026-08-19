@@ -60,8 +60,11 @@
 ;;; ── LLM call ─────────────────────────────────────────────────────────────────
 
 (defn llm-complete
-  "Call the LLM and return the assistant text."
-  [messages & {:keys [model provider system]}]
+  "Call the LLM and return the assistant text. `max-tokens` defaults to 2000
+   (plenty for a SQL/SPARQL query, this ns's usual caller) -- callers whose
+   expected response is bigger (eg infer.clj's synthesized-schema EDN)
+   should pass their own."
+  [messages & {:keys [model provider system max-tokens] :or {max-tokens 2000}}]
   (let [provider (or provider (get-in *project-conf* [:llm :provider]) :openai)
         model    (or model    (get-in *project-conf* [:llm :model])    "gpt-4o")
         start-ns (System/nanoTime)
@@ -71,7 +74,7 @@
                                                   {:role role :content content})
                                                 messages)
                                 :system system
-                                :max-tokens 2000})
+                                :max-tokens max-tokens})
         duration-ms (long (/ (- (System/nanoTime) start-ns) 1e6))]
     (when *last-llm-call*
       (reset! *last-llm-call* {:model model :provider provider :messages messages :system system

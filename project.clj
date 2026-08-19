@@ -10,6 +10,7 @@
                  [com.hyperphor/alzabo "1.3.4" :exclusions [hiccup]]
                  [com.hyperphor/ellum "0.1.3"]
                  [org.clojure/data.json "2.5.2"]
+                 [org.clojure/data.csv "1.1.0"] ;; infer.clj: reading tabular files for schema inference
                  [environ "1.2.0"]
                  [com.taoensso/timbre "6.7.1"]
                  [hato "1.0.0"]
