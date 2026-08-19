@@ -8,8 +8,8 @@
 "
   (:require [hyperphor.multitool.core :as u]
             [hyperphor.multitool.cljcore :as ju]
-            [hyperphor.ellellem.core :as llm]
-            [hyperphor.ellellem.util :as llm-util]
+            [hyperphor.ellum.core :as llm]
+            [hyperphor.ellum.util :as llm-util]
             [clojure.string :as str]
             [clojure.walk :as walk]
             [hyperphor.nlq.schema :as schema]

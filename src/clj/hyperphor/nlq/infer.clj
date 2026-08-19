@@ -19,15 +19,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [hyperphor.nlq.generate :as generate]
-            ;; hyperphor.ellellem.* (not hyperphor.ellum.*, the current
-            ;; artifact's actual namespace -- see generate.clj's identical
-            ;; require) only resolves because alzabo-1.3.4.jar happens to
-            ;; shade an AOT-compiled copy of the old ellellem package
-            ;; alongside its own classes. Kept for consistency with
-            ;; generate.clj/visgen.clj, which already depend on this same
-            ;; coincidence; a future alzabo bump that stops shading it would
-            ;; break all three at once, not just this file.
-            [hyperphor.ellellem.util :as llm-util]))
+            [hyperphor.ellum.util :as llm-util]))
 
 ;;; ── Reading tabular files ────────────────────────────────────────────────────
 
