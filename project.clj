@@ -1,4 +1,4 @@
-(defproject com.hyperphor/nlq "0.3.2"
+(defproject com.hyperphor/nlq "0.3.3"
   :description "Natural-language query engine for structured databases (SQL, SPARQL, ...) —  See design/hyperphorization.md"
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"

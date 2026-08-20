@@ -10,6 +10,7 @@
    database's own catalogs (see gen-alz-schema)."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [hyperphor.multitool.core :as u]
             [hyperphor.nlq.sources.sql :as sql]))
 
@@ -31,9 +32,23 @@
   [db]
   (:pg-schema db "public"))
 
+;;; Aggregates over a numeric/integer column (AVG/SUM/ROUND, ...) come back
+;;; from the JDBC driver as java.math.BigDecimal (an unexpectedly large
+;;; COUNT(*) would come back as BigInteger, same reasoning). Transit doesn't
+;;; handle these well so coerce to more standard types.
+(defn- untag-numerics
+  [rows]
+  (walk/postwalk
+   (fn [x]
+     (cond
+       (instance? BigDecimal x) (double x)
+       (instance? BigInteger x) (long x)
+       :else x))
+   rows))
+
 (defmethod sql/query :postgres
   [db sql-string]
-  (jdbc/query (jdbc-spec db) [sql-string]))
+  (untag-numerics (jdbc/query (jdbc-spec db) [sql-string])))
 
 ;;; Postgres table/column names are plain lowercase identifiers here (no
 ;;; spaces/mixed case to worry about, unlike BigQuery's CSV-imported tables),
