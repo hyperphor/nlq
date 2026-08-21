@@ -4,11 +4,8 @@ Natural-language query engine for structured databases — NL → SQL/SPARQL/Dat
 returned as data, with an Alzabo schema as the LLM's "schema dictionary" and a generic
 semantic-column/click-to-inspect UI layer for SQL-backed projects.
 
-Extracted from [`ParkerICI/okc`](https://github.com/ParkerICI/okc) (private) — see that repo's
-`design/hyperphorization.md` for the full extraction history, the generic-vs-PICI-specific
-analysis it was based on, and the phased plan. This repo is Phase 1: the config-liftable core,
-made schema-configurable (any Alzabo schema, not a hardcoded one) as a precondition, not a
-follow-on.
+For a live example (on a clinical trial database), see https://aact-9252332d616a.herokuapp.com/NL_query
+
 
 ## What's here
 
@@ -32,10 +29,6 @@ follow-on.
   (plain results grid, for query types without column semantics), `nlq-viz` (Vega-Lite viewer),
   `universal-query` (cross-project picker).
 
-## What's *not* here (stays in okc, or wherever the consuming app is)
-
-CANDEL import/export, Cirro sheet-upload ETL, Google Cloud Storage glue, per-project data
-methods, availability charts — all genuinely application-specific, not part of the query engine.
 
 # Version History
 
@@ -43,6 +36,6 @@ methods, availability charts — all genuinely application-specific, not part of
 0.2.0 schema inference
 0.3.0 postgres support
 0.3.1 bump com.hyperphor/way pin to 0.2.6 (config boot-log secret redaction)
-0.3.2 bump com.hyperphor/way pin to 0.2.7 (redact /api/config, the actual client-facing leak)
+0.3.2 bump com.hyperphor/way pin to 0.2.7 (redact /api/config)
 
 

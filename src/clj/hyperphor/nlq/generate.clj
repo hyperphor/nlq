@@ -95,7 +95,9 @@
 ;;; ── Generation multimethods ──────────────────────────────────────────────────
 
 (defmulti generate
-  "Translate a natural-language query to code. Returns [type code text]."
+  "Translate a natural-language query to code. Returns [type code text] where
+   code is the parsed/extracted result and text is any non-code surrounding
+   text."
   (fn [query-type _nl] query-type))
 
 (defmethod generate :sql [_ nl]
@@ -263,15 +265,16 @@
   [{:keys [bq-project bq-dataset bq-table]}]
   (bq/table-named (bq/dataset-named bq-project bq-dataset) bq-table))
 
-;;; Vis-query response-objects carry :viz-spec/:viz-text instead of
-;;; :query/:text/:results — normalized onto the same log columns below
-;;; rather than adding vis-only ones. :user_reason carries "viz" for those
-;;; rows (or an explicit :user-reason from response-object), so they're
-;;; distinguishable from regular NL->query rows without splitting :project.
 (defn record
   "Log an NLQ or vis-query response to BigQuery, if a log target is
    configured (see `log-target`) — a silent no-op otherwise. `llm-call` is
-   the map `llm-complete` captured via `*last-llm-call*` (nil for canned queries)."
+   the map captured by `llm-complete` via `*last-llm-call*` (nil for canned
+   queries, which never call the LLM). Vis-query response-objects carry
+   :viz-spec/:viz-text instead of :query/:text/:results — normalize those
+   onto the same log columns rather than adding vis-only columns.
+   :user_reason carries \"viz\" for those rows, or an explicit :user-reason
+   from response-object, so they're distinguishable from regular NL->query
+   rows without splitting :project."
   [project response-object & [llm-call]]
   (when-let [{:keys [bq-project] :as target} (log-target)]
     (let [{:keys [nl query text results error viz-spec viz-text user-reason]} response-object
