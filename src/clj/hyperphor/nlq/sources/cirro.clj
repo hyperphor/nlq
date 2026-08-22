@@ -275,11 +275,11 @@
   (api-get db (u/tx "/api/projects/{{id}}")))
 
 
-
+;;; Creates a project, copying most of the config from an existing one
 (defn create-project
-  [db name desc]
+  [db name desc template]
   (let [p0 (get-project db (-> (list-projects db)
-                               (u/select-by :name "PRINCE")
+                               (u/select-by :name template)
                                :id))]
     (api-post db  "/api/projects/"
               (-> p0
@@ -361,7 +361,8 @@
    insert-sheet-rows. `columns` is a seq of {:name :type} (:type one of
    Cirro's ColumnDataType values, case-insensitive), same shape sql/
    project-tables returns for existing sheets. Returns {:id :message}."
-  [{:keys [project] :as db} sheet-name columns & [table-name description]]
+  [{:keys [project] :as db} sheet-name columns & {:keys [table-name description] ;TODO update callers!
+                                                  :or {table-name (sheet-name->table-name sheet-name)}}]
   (api-post db (u/tx "/api/projects/{{project}}/sheets")
             {:sheetType "TABLE"
              :name sheet-name

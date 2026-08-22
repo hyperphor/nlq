@@ -16,11 +16,13 @@
             [hyperphor.nlq.sources.sql :as sql]
             [hyperphor.nlq.sources.sparql :as sparql]
             [hyperphor.nlq.sources.bigquery :as bq]
+            [hyperphor.nlq.logging.dynamo :as dynamo]
             [hyperphor.nlq.inspect :as inspect]
             [hyperphor.nlq.config :as nlqc]
             [hyperphor.way.config :as config]
             [hyperphor.way.data :as wd]
             [environ.core :as env]
+            [taoensso.timbre :as log]
             [clojure.java.shell :as shell]))
 
 ;;; Per-request project config — bound in `endpoint` before any generate/run-query calls.
@@ -240,13 +242,17 @@
 (def last-query-response (atom nil))
 
 ;;; ── Logging (optional) ───────────────────────────────────────────────────────
-;;; Logs every NL->query call to BigQuery, if (and only if) the consuming app
-;;; configures a log target — `(config/config :nlq-log)` => {:bq-project
-;;; :bq-dataset :bq-table}. Absent (the default): logging is a no-op, so a
-;;; project with no BigQuery credentials at all (eg a public-SPARQL-only demo
-;;; site) works fine without them. Uses sources.bigquery, brought over from
-;;; okc as a real sql/query :bigquery implementation — this is the one place
-;;; in this ns that reaches for it directly, for logging rather than querying.
+;;; Logs every NL->query call, if (and only if) the consuming app configures
+;;; a log target — `(config/config :nlq-log)`, dispatched on its :type
+;;; (:bigquery, the default when :type is absent for back-compat with
+;;; existing configs, or :dynamo): {:type :bigquery :bq-project :bq-dataset
+;;; :bq-table} or {:type :dynamo :table :region}. Absent entirely: logging is
+;;; a no-op, so a project with no logging credentials at all (eg a public-
+;;; SPARQL-only demo site) works fine without them. Uses sources.bigquery
+;;; (brought over from okc as a real sql/query :bigquery implementation) and
+;;; logging.dynamo (adapted from pici/pimento's own dynamo logging) — the
+;;; only place in this ns that reaches for either directly, for logging
+;;; rather than querying.
 
 (u/def-lazy githash
   "Heroku (or any host setting SOURCE_VERSION) wins; falls back to a local
@@ -261,57 +267,87 @@
   []
   (config/config :nlq-log))
 
-(defn- log-table
+(defn- bq-log-table
   [{:keys [bq-project bq-dataset bq-table]}]
   (bq/table-named (bq/dataset-named bq-project bq-dataset) bq-table))
 
+;;; Backend-agnostic log row shape — everything both bigquery.clj's schema
+;;; and dynamo's flat-map item can hold. :datetime is added per-backend
+;;; below (bq/bq-time's format vs. dynamo/write-item's own default).
+(defn- log-row
+  [project response-object llm-call]
+  (let [{:keys [nl query text results error viz-spec viz-text user-reason]} response-object]
+    {:nl nl
+     :query (str (or query viz-spec))
+     :text (or text viz-text)
+     :results (pr-str (take 2 results))
+     :error (when error (print-str error))
+     :project project
+     :model (:model llm-call)
+     :provider (some-> (:provider llm-call) name)
+     :prompt (some-> (:messages llm-call) pr-str)
+     :duration_ms (:duration-ms llm-call)
+     :user_reason (or user-reason (when (or viz-spec viz-text) "viz"))
+     :githash @githash}))
+
 (defn record
-  "Log an NLQ or vis-query response to BigQuery, if a log target is
-   configured (see `log-target`) — a silent no-op otherwise. `llm-call` is
-   the map captured by `llm-complete` via `*last-llm-call*` (nil for canned
-   queries, which never call the LLM). Vis-query response-objects carry
-   :viz-spec/:viz-text instead of :query/:text/:results — normalize those
-   onto the same log columns rather than adding vis-only columns.
-   :user_reason carries \"viz\" for those rows, or an explicit :user-reason
-   from response-object, so they're distinguishable from regular NL->query
-   rows without splitting :project."
+  "Log an NLQ or vis-query response, if a log target is configured (see
+   `log-target`) — a silent no-op otherwise. `llm-call` is the map captured
+   by `llm-complete` via `*last-llm-call*` (nil for canned queries, which
+   never call the LLM). Vis-query response-objects carry :viz-spec/:viz-text
+   instead of :query/:text/:results — normalized onto the same log columns
+   rather than adding vis-only columns. :user_reason carries \"viz\" for
+   those rows, or an explicit :user-reason from response-object, so they're
+   distinguishable from regular NL->query rows without splitting :project.
+   Logging failure (bad credentials, unreachable table, ...) is caught and
+   warned, not thrown — a broken log target shouldn't 500 out an otherwise-
+   successful query response."
   [project response-object & [llm-call]]
-  (when-let [{:keys [bq-project] :as target} (log-target)]
-    (let [{:keys [nl query text results error viz-spec viz-text user-reason]} response-object
-          to-save {:nl nl
-                   :query (str (or query viz-spec))
-                   :text (or text viz-text)
-                   :results (pr-str (take 2 results))
-                   :error (when error (print-str error))
-                   :datetime (bq/bq-time (ju/now))
-                   :project project
-                   :model (:model llm-call)
-                   :provider (some-> (:provider llm-call) name)
-                   :prompt (some-> (:messages llm-call) pr-str)
-                   :duration_ms (:duration-ms llm-call)
-                   :user_reason (or user-reason (when (or viz-spec viz-text) "viz"))
-                   :githash @githash}]
-      (bq/add-row bq-project (log-table target) (u/map-keys name to-save)))))
+  (when-let [target (log-target)]
+    (try
+      (let [row (log-row project response-object llm-call)]
+        (case (:type target :bigquery)
+          :bigquery (bq/add-row (:bq-project target) (bq-log-table target)
+                                (u/map-keys name (assoc row :datetime (bq/bq-time (ju/now)))))
+          :dynamo   (dynamo/write-item (:table target) (:region target "us-east-1") row)))
+      (catch Exception e
+        (log/warn e "NLQ log write failed" {:type (:type target :bigquery)})))))
 
 (defn recent
   "The `n` most recent NLQ log rows, newest first. nil if no log target is
    configured."
   [& [n]]
-  (when-let [{:keys [bq-project bq-dataset bq-table]} (log-target)]
+  (when-let [target (log-target)]
     (let [n (or n 10)]
-      (bq/query bq-project
-                (u/tx "select * from `{{bq-project}}.{{bq-dataset}}.{{bq-table}}` order by datetime desc limit {{n}}")))))
+      (case (:type target :bigquery)
+        :bigquery (let [{:keys [bq-project bq-dataset bq-table]} target]
+                    (bq/query bq-project
+                              (u/tx "select * from `{{bq-project}}.{{bq-dataset}}.{{bq-table}}` order by datetime desc limit {{n}}")))
+        :dynamo (dynamo/recent-items (:table target) (:region target "us-east-1") n)))))
 
 (defn all-log-rows
   "The full NLQ log dataset, newest first. nil if no log target is configured."
   []
-  (when-let [{:keys [bq-project bq-dataset bq-table]} (log-target)]
-    (bq/query bq-project
-              (u/tx "select * from `{{bq-project}}.{{bq-dataset}}.{{bq-table}}` order by datetime desc"))))
+  (when-let [target (log-target)]
+    (case (:type target :bigquery)
+      :bigquery (let [{:keys [bq-project bq-dataset bq-table]} target]
+                  (bq/query bq-project
+                            (u/tx "select * from `{{bq-project}}.{{bq-dataset}}.{{bq-table}}` order by datetime desc")))
+      :dynamo (dynamo/all-items (:table target) (:region target "us-east-1")))))
 
 (defmethod wd/data :nlq-log-full [_] (all-log-rows))
 
 ;;; ──  NLQ endpoint ─────────────────────────────────────────────────────
+
+;;; Shared by `endpoint` and `requery-endpoint` so a requery gets the same
+;;; icons/tooltips/click-to-inspect as a fresh NL query, not a silently
+;;; downgraded grid.
+(defn- with-columns
+  [response-object]
+  (assoc response-object :columns
+         ((requiring-resolve 'hyperphor.nlq.inspect/annotate-inspectable)
+          (:db *project-conf*)
+          (schema/columns-info (alz-schema) (:results response-object)))))
 
 (defn endpoint
   [project query-type nl]
@@ -319,23 +355,35 @@
             *last-llm-call* (atom nil)
             *query-type* query-type]
     (let [response-object
-          (with-ex
-            :nl nl
-            [:query :text] (generate-or-canned query-type :nl)
-            :results (run-query :query))
-          response-object (assoc response-object :columns
-                                 ((requiring-resolve 'hyperphor.nlq.inspect/annotate-inspectable)
-                                  (:db *project-conf*)
-                                  (schema/columns-info (alz-schema) (:results response-object))))]
+          (-> (with-ex
+                :nl nl
+                [:query :text] (generate-or-canned query-type :nl)
+                :results (run-query :query))
+              with-columns)]
       (reset! last-query-response response-object)
       (record project response-object @*last-llm-call*)
       (update response-object :error #(when % (print-str %))))))
 
+;;; For the "edit the generated SQL and rerun it" flow (see design/TODO.md):
+;;; skips NL->query generation entirely and runs `query-text` as-is. Needs
+;;; `project` (unlike `endpoint`, nothing upstream of this call has already
+;;; bound `*project-conf*`) so `run-query`/`alz-schema` resolve the right
+;;; db/schema.
 (defn requery-endpoint
-  [query-type query-text]
-  (binding [*query-type* query-type]
-    (let [response-object (with-ex
-                            :query query-text
-                            :results (run-query :query))]
+  [project query-type query-text]
+  (binding [*project-conf* (nlqc/project-named project)
+            *query-type* (keyword query-type)]
+    (let [response-object (-> (with-ex
+                                :query query-text
+                                :results (run-query :query))
+                              with-columns
+                              ;; Distinguishes requery rows from regular NL->query
+                              ;; ones in the log (see `record`'s :user_reason).
+                              (assoc :user-reason "requery"))]
       (reset! last-query-response response-object)
+      (record project response-object)
       (update response-object :error #(when % (print-str %))))))
+
+(defmethod wd/data :nlq-requery
+  [{:keys [project query-type query]}]
+  (requery-endpoint project query-type query))

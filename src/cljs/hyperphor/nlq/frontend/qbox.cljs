@@ -68,6 +68,38 @@
                                     :handler (fn [response] (rf/dispatch [:qbox-query-response id response]))})
    (assoc-in db [:qbox id :spin?] true)))
 
+;;; ── Editable generated query (design/TODO.md) ──────────────────────────────
+;;; Lets the user edit the generated SQL/SPARQL/etc and rerun it as-is,
+;;; skipping NL->query generation, via the backend's generic :nlq-requery
+;;; data method (see hyperphor.nlq.generate/requery-endpoint). Kept at its own
+;;; form path (`:query-code`, distinct from the NL textarea's `:query-text`)
+;;; and seeded only when a response lands (`:qbox-query-response` below) --
+;;; never rebuilt from the response on every render -- so typing in it doesn't
+;;; fight React over cursor position (the bug that sank the old nlflame version
+;;; of this feature).
+(defn query-editor
+  [id project label]
+  [:div.vstack.m-3
+   [form/form-field {:type :textarea
+                     :path [id :query-code]
+                     :style {:width "100%"
+                             :height "300px"
+                             :font-family "monospace"}}]
+   [:button.btn.btn-primary.mt-2
+    {:style {:align-self "flex-start"}
+     :on-click #(rf/dispatch [:qbox-requery id project])}
+    (str "Run " label)]])
+
+(rf/reg-event-db
+ :qbox-requery
+ (fn [db [_ id project]]
+   (api/api-get "/data" {:params {:data-id "nlq-requery"
+                                  :project project
+                                  :query-type (name id)
+                                  :query (get-in db [:form id :query-code])}
+                         :handler (fn [response] (rf/dispatch [:qbox-query-response id response]))})
+   (assoc-in db [:qbox id :spin?] true)))
+
 (rf/reg-sub
  :qbox-results
  (fn [db [_ id]]
@@ -86,21 +118,29 @@
        (assoc-in [:form id :query-text] text)
        )))
 
+;;; sql_query.cljs/sparql_query.cljs register their card stack as
+;;; `<id>-cards` (eg :sql -> :sql-cards) -- used below to force the error
+;;; card open on response, even if the user has since collapsed it (as they
+;;; will have, to reach the :sql card's query-editor and hit Run in the
+;;; first place) -- otherwise a requery syntax error silently vanishes into
+;;; a closed card and the user just sees the spinner stop.
+(defn- cards-id-for
+  [id]
+  (keyword (str (name id) "-cards")))
+
 (rf/reg-event-db
  :qbox-query-response
  (fn [db [_ id response]]
-   ;; TODO!
-   #_
    (when (:error response)
-     (rf/dispatch [:open-card :nlq :error]))
-   (-> db
-       (assoc-in [:qbox id :spin?] false)
-       (assoc-in [:qbox id :response] response)
-       ;; Put datalog query into form so it can be edited
-       ;; TODO
-       #_                               
-       (assoc-in [:form :qgen :datalog]
-                 (with-out-str (pprint/pprint (:query response)))))))
+     (rf/dispatch [:open-card (cards-id-for id) :error]))
+   (cond-> db
+     true (assoc-in [:qbox id :spin?] false)
+     true (assoc-in [:qbox id :response] response)
+     ;; Seed the editable-query pane (see query-editor/:qbox-requery) with
+     ;; the query this response just ran, so edit+rerun starts from it. Not
+     ;; unconditional -- a vis-query response (:sql-vizq) carries :viz-spec/
+     ;; :viz-text instead of :query, and would otherwise blank the field.
+     (:query response) (assoc-in [:form id :query-code] (:query response)))))
 
 (rf/reg-sub
  :qbox-response

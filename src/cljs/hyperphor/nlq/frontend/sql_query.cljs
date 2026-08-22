@@ -347,7 +347,7 @@
       [:div {:style {:max-width "600px" :min-width "600px"}}
        [cards/cards :sql-cards
         [{:name :query :view (fn [] (query-card project))}
-         (when query {:name :sql :view (fn [] [:pre.m-3 query])})
+         (when query {:name :sql :view (fn [] [qbox/query-editor :sql project "SQL"])})
          (when text {:name :plan :view (fn [] [:div.m-3 (md/render text)])})
          (when error {:name :error :open? true
                       :view (fn [] [:div.alert.alert-warning [:pre {:style {:text-wrap "auto"}} error]])})

@@ -1,4 +1,4 @@
-(defproject com.hyperphor/nlq "0.3.3"
+(defproject com.hyperphor/nlq "0.3.4"
   :description "Natural-language query engine for structured databases (SQL, SPARQL, ...) —  See design/hyperphorization.md"
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"
@@ -21,6 +21,8 @@
                  [com.cognitect.aws/api "0.8.838"]
                  [com.cognitect.aws/endpoints "871.2.51.4"]
                  [com.cognitect.aws/s3 "871.2.51.4"]
+                 ;; logging/dynamo.clj -- :dynamo :nlq-log backend
+                 [com.cognitect.aws/dynamodb "871.2.39.3"]
 
                  ;; sources/postgres.clj. Plain java.jdbc + the driver, not
                  ;; clj-postgresql -- the latter's only pull here would have
