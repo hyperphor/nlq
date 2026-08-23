@@ -1,4 +1,4 @@
-(defproject com.hyperphor/nlq "0.3.5"
+(defproject com.hyperphor/nlq "0.3.6"
   :description "Natural-language query engine for structured databases (SQL, SPARQL, ...) —  See design/hyperphorization.md"
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"
@@ -7,7 +7,7 @@
   :dependencies [[org.clojure/clojure "1.12.5"]
                  [com.hyperphor/multitool "0.3.0"]
                  [com.hyperphor/way "0.2.7"]
-                 [com.hyperphor/alzabo "1.3.4" :exclusions [hiccup]]
+                 [com.hyperphor/alzabo "1.3.5" :exclusions [hiccup]]
                  [com.hyperphor/ellum "0.1.3"]
                  [org.clojure/data.json "2.5.2"]
                  [org.clojure/data.csv "1.1.0"] ;; infer.clj: reading tabular files for schema inference
