@@ -354,10 +354,19 @@
          {:name :visualize :view (fn [] (viz-card project results))}
          {:name :inspector :view inspector-pane}]]]
       [:div.vstack {:style {:min-width "800px"}}
-       [:div {:style {:height "50%"}}
+       ;; :flex-shrink 0 + :min-height guard against a real display bug: an
+       ;; oversized viz sibling (eg an LLM-generated Vega-Lite spec with a
+       ;; big :width/:height, or a wide facet grid) otherwise squeezes this
+       ;; grid all the way to 0 rows. ag-grid's own internal overflow gives
+       ;; it a flexbox "automatic minimum size" of 0, so an unconstrained,
+       ;; unshrinkable sibling is free to claim 100% of the shared space.
+       [:div {:style {:height "50%" :min-height "300px" :flex-shrink 0}}
         [sql-grid-view project results columns]]
        ;; Not gated on `results`: a visualize attempt can produce an error (e.g.
        ;; "no query results yet") even when there's no main-query data to show,
-       ;; and that error still needs to render.
-       [:div
+       ;; and that error still needs to render. Bounded + scrollable (rather
+       ;; than the fix above's flex-shrink:0, which would just push this
+       ;; div's overflow below the fold instead) so an oversized chart stays
+       ;; fully reachable without blowing out the page layout.
+       [:div {:style {:max-height "50%" :overflow "auto"}}
         [nlqv/ui results :sql-vizq]]]]]))
