@@ -41,5 +41,12 @@ For a live example (on a clinical trial database), see https://aact-9252332d616a
       error body; s3-token-ds caches per [host project dataset-id] to avoid Cirro's
       /s3-token rate limit (both cherry-picked from okc's unmerged nlq-arbitrary-schema
       branch, see design/unmerged-branches-audit.md there)
+0.3.8 bump com.hyperphor/{multitool,alzabo} pins to 0.3.1/1.3.6 -- alzabo 1.3.5 had
+      switched clean-enum-value's clean-string to call multitool's strip-chars, which
+      silently returns a bare Character (not a String) for any single-char result via
+      a reduce-with-no-init bug; alzabo 1.3.4 had its own local workaround for exactly
+      this ("One in multitool is broken") that 1.3.5 dropped. Fixed at the root in
+      multitool 0.3.1 instead of restoring the workaround. Found via okc's
+      resources/candel/schema.alz.edn tripping it during a routine pin bump.
 
 
