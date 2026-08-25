@@ -36,15 +36,17 @@
     body))
 
 (defn- check-response
-  "Throws a clear ex-info if the response is an error, otherwise returns the parsed body."
+  "Throws a clear ex-info if the response is an error, otherwise returns the parsed body.
+   Doesn't assume the error body has :errorCode/:errorDetail -- some Cirro error responses
+   (eg S3 rate-limit 429s) aren't shaped that way, which used to crash this (a confusing
+   \"Missing template parameter\" from u/tx) instead of reporting the real error."
   [{:keys [status body] :as resp} url]
   (let [body (coerce-json body)
-        {:keys [errorCode errorDetail]} body]
+        {:keys [errorCode errorDetail message]} body]
     (if (< status 400)
       body
-      (let [msg (u/tx "Error {{errorCode}} {{errorDetail}}" )]
-        (throw (ex-info (str "Cirro API error: " msg)
-                        {:url url :status status :body body}))))))
+      (throw (ex-info (str "Cirro API error: " (or errorCode status) " " (or errorDetail message body))
+                      {:url url :status status :body body})))))
 
 (declare get-access-token)
 
@@ -651,13 +653,31 @@
 ;;; PROJECT_DOWNLOAD is unverified against the live API -- it's the current
 ;;; best guess after DATASET_UPLOAD and an sftp token both failed (see
 ;;; comments above); if this 403s, that's the first thing to re-check.
+;;; Cirro's /s3-token endpoint rate-limits (429 Too Many Requests) -- checked live:
+;;; requesting a fresh token per file, as a picker UI naturally does when browsing
+;;; through several files, trips this within ~10 calls. One dataset's credentials are
+;;; good for any file inside it (scoped to the dataset, not a specific path), so cache
+;;; by [host project dataset-id] and reuse until near :expiration, same idiom as
+;;; get-access-token's token-cache.
+(def ^:private s3-creds-cache (atom {}))
+
 (defn s3-token-ds
   "Short-lived AWS credentials ({:accessKeyId :secretAccessKey :sessionToken
-   :expiration}) scoped to reading dataset-id's files, via the PROJECT_DOWNLOAD access type."
-  [{:keys [project] :as db} dataset-id]
-  (api-post db (u/tx "/api/projects/{{project}}/s3-token")
-                  {:accessType "PROJECT_DOWNLOAD"
-                   :datasetId dataset-id}))
+   :expiration}) scoped to reading dataset-id's files, via the PROJECT_DOWNLOAD access
+   type. Cached per [host project dataset-id] until near expiration."
+  [{:keys [project host] :as db} dataset-id]
+  (let [cache-key [host project dataset-id]
+        cached    (get @s3-creds-cache cache-key)
+        fresh?    (and cached
+                       (.isAfter (java.time.Instant/parse (:expiration cached))
+                                 (.plusSeconds (java.time.Instant/now) 60)))]
+    (if fresh?
+      cached
+      (let [creds (api-post db (u/tx "/api/projects/{{project}}/s3-token")
+                             {:accessType "PROJECT_DOWNLOAD"
+                              :datasetId dataset-id})]
+        (swap! s3-creds-cache assoc cache-key creds)
+        creds))))
 
 ;;; Cirro's /api/info/system doesn't surface an S3 region separately from
 ;;; Cognito's -- same fallback cirro.clj's own ingest-sheet-file uses

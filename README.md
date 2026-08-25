@@ -37,5 +37,9 @@ For a live example (on a clinical trial database), see https://aact-9252332d616a
 0.3.0 postgres support
 0.3.1 bump com.hyperphor/way pin to 0.2.6 (config boot-log secret redaction)
 0.3.2 bump com.hyperphor/way pin to 0.2.7 (redact /api/config)
+0.3.7 sources/cirro.clj: check-response no longer crashes on an atypically-shaped
+      error body; s3-token-ds caches per [host project dataset-id] to avoid Cirro's
+      /s3-token rate limit (both cherry-picked from okc's unmerged nlq-arbitrary-schema
+      branch, see design/unmerged-branches-audit.md there)
 
 
