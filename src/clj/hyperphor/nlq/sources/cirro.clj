@@ -1,4 +1,4 @@
-g(ns hyperphor.nlq.sources.cirro
+(ns hyperphor.nlq.sources.cirro
   (:require [hato.client :as client]
             [clojure.data.json :as json]
             [clojure.string :as str]

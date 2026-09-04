@@ -137,11 +137,22 @@
       (:doc info) (assoc :headerTooltip (:doc info))
       renderer    (assoc :cellRenderer renderer))))
 
+(defn effective-kind
+  "The kind a column is grouped and iconified under: its FK :ref-kind if it
+   has one, else its own owning :kind. Must agree with column-def's :icon
+   lookup (same effective-kind logic in schema.clj's resolved-column-info)
+   — otherwise a column can show one kind's icon while sitting in a
+   different kind's group (eg a sample_subject-style FK column showing the
+   referenced kind's icon but grouped with its owning table's own columns)."
+  [info]
+  (or (:ref-kind info) (:kind info)))
+
 (defn column-group-key
-  "Columns with the same owning kind share a key (to be grouped together); an
-   unresolved column gets a key unique to itself, so it doesn't merge or move."
+  "Columns with the same effective kind share a key (to be grouped
+   together); an unresolved column gets a key unique to itself, so it
+   doesn't merge or move."
   [col columns-info]
-  (or (:kind (get columns-info col)) col))
+  (or (effective-kind (get columns-info col)) col))
 
 ;;; A stable group-by, not a resort, so unrelated/unresolved columns stay
 ;;; roughly where the query put them. `group-priority` is optional (eg a
@@ -174,7 +185,7 @@
    resolved type renders as a plain top-level column, not wrapped."
   [project cols columns-info & [group-priority]]
   (mapv (fn [[gk members]]
-          (let [real-kind? (= gk (:kind (get columns-info (first members))))
+          (let [real-kind? (= gk (effective-kind (get columns-info (first members))))
                 child-defs (map-indexed
                             (fn [i col]
                               (cond-> (column-def project col columns-info)
