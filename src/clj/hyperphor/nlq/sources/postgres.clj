@@ -46,9 +46,24 @@
        :else x))
    rows))
 
+;;; PGJDBC's PreparedStatement.executeQuery() (what clojure.java.jdbc/query
+;;; uses under the hood) throws "Multiple ResultSets were returned by the
+;;; query." whenever the SQL text has more than one semicolon-delimited
+;;; fragment -- even a trailing fragment that's just a comment, eg an LLM
+;;; appending "-- adjust the limit as needed" after the closing ";" (seen
+;;; live in nlq-aact, 2026-09-07: a previously-working query started failing
+;;; this way once the model happened to generate a trailing comment). Real
+;;; multi-statement SQL isn't something generated single-query SQL should
+;;; ever need, so strip a trailing terminator + any trailing line comments
+;;; before executing. Doesn't handle a trailing block (/* ... */) comment --
+;;; not seen in practice yet.
+(defn- strip-trailing-terminator
+  [sql-string]
+  (str/replace sql-string #";(?:\s*--[^\n]*)*\s*$" ""))
+
 (defmethod sql/query :postgres
   [db sql-string]
-  (untag-numerics (jdbc/query (jdbc-spec db) [sql-string])))
+  (untag-numerics (jdbc/query (jdbc-spec db) [(strip-trailing-terminator sql-string)])))
 
 ;;; Postgres table/column names are plain lowercase identifiers here (no
 ;;; spaces/mixed case to worry about, unlike BigQuery's CSV-imported tables),
