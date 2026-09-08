@@ -44,6 +44,26 @@
     (reagent/as-element
      [:span.ag-cell-wrap-text (external-link template (.-value params))])))
 
+(defn link-field-cell-renderer
+  "Cell renderer for a :link-field column (see schema/resolved-column-info):
+   shows this column's own value, hyperlinked off link-col's raw value
+   elsewhere in the same row (eg a filename linking to its gs: path) — through
+   link-template if given (a {{value}} URL template, same convention as
+   :external-link-template), else the sibling value verbatim."
+  [link-col link-template]
+  (fn [params]
+    (let [link-value (aget (.-data params) (name link-col))
+          ;; link-template puts link-value in a URL — a query param today,
+          ;; maybe a path segment for Cirro later — so encode it rather than
+          ;; assume it's already URL-safe (a gs: path can carry #, &, +, etc,
+          ;; any of which would otherwise truncate or corrupt the URL).
+          href (if link-template
+                 (u/expand-template link-template {:value (js/encodeURIComponent link-value)} :allow-missing? true)
+                 link-value)]
+      (reagent/as-element
+       [:span.ag-cell-wrap-text
+        [:a.ent-ext {:href href :target "_ext"} (str (.-value params))]]))))
+
 (defn id-column?
   "True for a group's own identifier column (Alzabo :field :id, or by name
    for unresolved columns) — not a foreign key pointing at that kind."
@@ -84,6 +104,18 @@
   [kind columns-info]
   (ffirst (filter (fn [[col info]] (= kind (inspectable-kind col info))) columns-info)))
 
+(defn field-col-for-kind
+  "The column (in this result set) carrying kind's `field`, if any — used to
+   resolve a :link-field to the sibling column that actually holds it. nil
+   if that field wasn't selected in this particular query. Requires a nil
+   :ref-kind, same hazard as inspected-kind-icon below: an FK column's :kind
+   is its *owning* table, not the kind it points at, so without this guard a
+   same-named FK could be mistaken for the sibling field itself."
+  [kind field columns-info]
+  (ffirst (filter (fn [[_ info]] (and (= kind (:kind info)) (= field (:field info))
+                                       (nil? (:ref-kind info))))
+                   columns-info)))
+
 ;;; Always an in-app link, even for a kind with an :external-link-template —
 ;;; a study's title is how a user finds/recognizes it in-app; its id/FK
 ;;; columns are what carry the external link instead (see column-def /
@@ -120,6 +152,13 @@
         ;; this the same as "no renderer" rather than building a broken one.
         label-kind (when (:label? info) (:kind info))
         label-id-col (when label-kind (id-col-for-kind label-kind columns-info))
+        ;; A :link-field column (eg :file's :name => :warehouse) links out to
+        ;; a sibling column's raw value rather than a URL built from its own
+        ;; — only usable if this result set actually selected that sibling
+        ;; column (link-col can be nil, same reasoning as label-id-col above).
+        link-field (:link-field info)
+        link-col (when link-field (field-col-for-kind (:kind info) link-field columns-info))
+        link-field-template (:link-template info)
         ;; A resolved column always sits under a group header naming its
         ;; :kind (see ag-column-defs), so the kind part of the raw column
         ;; name (eg subject_sex's "subject") is redundant there — show just
@@ -129,6 +168,12 @@
         label (if-let [field (:field info)] (name field) (name col))
         renderer (cond
                    link-template (external-link-renderer link-template)
+                   ;; A :link-field column wins over inspect/label handling —
+                   ;; it's an explicit schema opt-in for this exact column
+                   ;; (eg a file's name should download, not drill down), so
+                   ;; there's no case today where both apply to the same
+                   ;; column and disagree.
+                   (and link-field link-col) (link-field-cell-renderer link-col link-field-template)
                    inspect-kind  (inspect-cell-renderer project inspect-kind)
                    (and label-kind label-id-col)
                    (label-inspect-cell-renderer project label-kind label-id-col))]
