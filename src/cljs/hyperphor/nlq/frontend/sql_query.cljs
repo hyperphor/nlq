@@ -120,12 +120,12 @@
         ;; this the same as "no renderer" rather than building a broken one.
         label-kind (when (:label? info) (:kind info))
         label-id-col (when label-kind (id-col-for-kind label-kind columns-info))
-        icon  (:icon info)
         ;; A resolved column always sits under a group header naming its
         ;; :kind (see ag-column-defs), so the kind part of the raw column
         ;; name (eg subject_sex's "subject") is redundant there — show just
-        ;; the field. Unresolved columns have no group header for context,
-        ;; so keep the full raw name.
+        ;; the field; the group header carries the kind's icon, not this
+        ;; row. Unresolved columns have no group header for context, so
+        ;; keep the full raw name.
         label (if-let [field (:field info)] (name field) (name col))
         renderer (cond
                    link-template (external-link-renderer link-template)
@@ -133,7 +133,7 @@
                    (and label-kind label-id-col)
                    (label-inspect-cell-renderer project label-kind label-id-col))]
     (cond-> {:field col
-             :headerName (str (when icon (str icon " ")) label)}
+             :headerName label}
       (:doc info) (assoc :headerTooltip (:doc info))
       renderer    (assoc :cellRenderer renderer))))
 
@@ -173,8 +173,8 @@
       [gk (sort-by #(if (id-column? % (get columns-info %)) 0 1) (get groups gk))])))
 
 (defn group-label
-  [kind]
-  (some-> (name kind) (str/replace "-" " ") str/capitalize))
+  [kind icon]
+  (str (when icon (str icon " ")) (some-> (name kind) (str/replace "-" " ") str/capitalize)))
 
 ;;; ag-grid only renders the expand/collapse toggle once some child is
 ;;; marked :columnGroupShow "open" — without it a group header can't be
@@ -193,7 +193,7 @@
                             members)]
             (if real-kind?
               {:groupId (name gk)
-               :headerName (group-label gk)
+               :headerName (group-label gk (:icon (get columns-info (first members))))
                :openByDefault true
                :children (vec child-defs)}
               (first child-defs))))
