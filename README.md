@@ -29,6 +29,10 @@ For a live example (on a clinical trial database), see https://aact-9252332d616a
   (plain results grid, for query types without column semantics), `nlq-viz` (Vega-Lite viewer),
   `universal-query` (cross-project picker).
 
+## Details
+
+See `design/` folder
+
 
 # Version History
 

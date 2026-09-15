@@ -220,7 +220,8 @@
 ;;; anything was cut off. Page through it instead.
 (def ^:private raw-query-page-size
   "Cirro's own max for SheetQueryRequest's :limit."
-  10000)
+  #_ 10000                              ;doesn't work so decimated
+  1000)
 
 (def ^:private raw-query-max-rows
   "Safety ceiling on total rows paged in for one query, so a pathological
@@ -631,19 +632,37 @@
      })
 
 (defn project-datasets
-  [{:keys [project subproject] :as db}]
+  [{:keys [project] :as db}]
   (->> (api-get db (u/tx "/api/projects/{{project}}/datasets") {})
        ;; TODO look at :nextToken for paging
        :data))
 
 ;;; Has more including s3: location
 (u/defn-memoized get-dataset
-  [{:keys [project subproject] :as db} dataset]
+  [{:keys [project] :as db} dataset]
   (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}") {})
        ))
 
+;;; Not generally useful
+(defn get-dataset-samplesheet
+  [{:keys [project] :as db} dataset]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}/samplesheet") {})
+       ))
+
+(defn get-dataset-samples
+  [{:keys [project] :as db} dataset]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}/samples") {})
+       ))
+
+(defn get-project-samples
+  [{:keys [project] :as db}]
+  (->> (api-get db (u/tx "/api/projects/{{project}}/samples") {})
+       :data
+       ;; TODO paging
+       ))
+
 (defn get-dataset-files
-  [{:keys [project subproject] :as db} dataset]
+  [{:keys [project] :as db} dataset]
   (->> (api-get db (u/tx "/api/projects/{{project}}/datasets/{{dataset}}/files") {})
        ))
 

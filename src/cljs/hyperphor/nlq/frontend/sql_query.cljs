@@ -44,6 +44,83 @@
     (reagent/as-element
      [:span.ag-cell-wrap-text (external-link template (.-value params))])))
 
+(defn link-field-cell-renderer
+  "Cell renderer for a :link-field column (see schema/resolved-column-info):
+   shows this column's own value, hyperlinked off link-col's raw value
+   elsewhere in the same row (eg a filename linking to its gs: path) — through
+   link-template if given (a {{value}} URL template, same convention as
+   :external-link-template), else the sibling value verbatim."
+  [link-col link-template]
+  (fn [params]
+    (let [link-value (aget (.-data params) (name link-col))
+          ;; link-template puts link-value in a URL — a query param today,
+          ;; maybe a path segment for Cirro later — so encode it rather than
+          ;; assume it's already URL-safe (a gs: path can carry #, &, +, etc,
+          ;; any of which would otherwise truncate or corrupt the URL).
+          href (if link-template
+                 (u/expand-template link-template {:value (js/encodeURIComponent link-value)} :allow-missing? true)
+                 link-value)
+          label (str (.-value params))]
+      (reagent/as-element
+       [:span.ag-cell-wrap-text
+        [:a.ent-ext
+         {:href href
+          ;; No :target "_ext" here, unlike external-link above — this href
+          ;; always responds Content-Disposition: attachment (see
+          ;; gs/download-response), which downloads in place without leaving
+          ;; the current page. Forcing a new tab for it just makes the
+          ;; browser flash a blank tab open-then-closed around the download.
+          ;; A plain <a> download gives no feedback while the server-side
+          ;; GCS fetch gets going, which reads as a dead click on anything
+          ;; but a tiny file. Swap the label to a transient "Downloading…"
+          ;; on click, direct DOM mutation rather than reagent state — this
+          ;; is a one-off React element ag-grid mounts per cell, not part of
+          ;; the normal reactive tree, so an atom deref here isn't reliably
+          ;; watched. Left as native navigation (no preventDefault, no
+          ;; fetch+blob) so an arbitrarily large file still streams straight
+          ;; to disk instead of buffering in browser memory.
+          :on-click (fn [e]
+                      (let [el (.-currentTarget e)]
+                        (set! (.-textContent el) "Downloading…")
+                        (js/setTimeout #(set! (.-textContent el) label) 3000)))}
+         label]]))))
+
+;;; fetch + blob + a synthetic <a download>, so a caller can show progress
+;;; while a slow backend fetch/stream (eg zipping several GCS blobs) is in
+;;; flight — a plain <a> gives no such signal. Deliberately NOT used for
+;;; individual link-field cells above: those proxy a single GCS blob
+;;; straight through (gs/download-response, verified byte-exact), and
+;;; fetch+blob would buffer the whole file in browser memory before saving
+;;; it, which is fine for a small file but not for an arbitrarily large one
+;;; (eg a multi-GB dataset file) — a regression not worth trading for a
+;;; spinner. Download All (below) already has to build the zip fully before
+;;; the first byte, and is bounded by what the query actually selected, so
+;;; that tradeoff doesn't apply there.
+(defn fetch-and-save!
+  "Fetches `href`, saves the response as `filename` via a synthetic <a
+   download>, and swaps `state` from :downloading back to nil/absent when
+   done (success or failure). `opts` is passed through to js/fetch (eg
+   {:method \"POST\" :body ...})."
+  [state key href filename & [opts]]
+  (swap! state assoc key :downloading)
+  (-> (js/fetch href (clj->js (or opts {})))
+      (.then (fn [response]
+               (if (.-ok response)
+                 (.blob response)
+                 (throw (js/Error. (str "Download failed: " (.-status response)))))))
+      (.then (fn [blob]
+               (let [url (js/URL.createObjectURL blob)
+                     a (.createElement js/document "a")]
+                 (set! (.-href a) url)
+                 (set! (.-download a) filename)
+                 (.click a)
+                 ;; Some browsers (notably Safari) haven't finished handing
+                 ;; the blob to the download manager by the time .click()
+                 ;; returns; revoking immediately can cancel the save.
+                 (js/setTimeout #(js/URL.revokeObjectURL url) 1000))))
+      (.catch (fn [err] (js/console.error "Download failed:" err)))
+      (.finally (fn [] (swap! state dissoc key)))))
+
 (defn id-column?
   "True for a group's own identifier column (Alzabo :field :id, or by name
    for unresolved columns) — not a foreign key pointing at that kind."
@@ -84,6 +161,80 @@
   [kind columns-info]
   (ffirst (filter (fn [[col info]] (= kind (inspectable-kind col info))) columns-info)))
 
+(defn field-col-for-kind
+  "The column (in this result set) carrying kind's `field`, if any — used to
+   resolve a :link-field to the sibling column that actually holds it. nil
+   if that field wasn't selected in this particular query. Requires a nil
+   :ref-kind, same hazard as inspected-kind-icon below: an FK column's :kind
+   is its *owning* table, not the kind it points at, so without this guard a
+   same-named FK could be mistaken for the sibling field itself."
+  [kind field columns-info]
+  (ffirst (filter (fn [[_ info]] (and (= kind (:kind info)) (= field (:field info))
+                                       (nil? (:ref-kind info))))
+                   columns-info)))
+
+;;; ── Download All ──────────────────────────────────────────────────────────
+;;; Schema-driven, like the rest of this ns: keyed off "does this result set
+;;; have a resolved :link-field column" (same resolution field-col-for-kind
+;;; already does for individual cell links), never off a specific kind/field
+;;; name.
+
+(defn link-cols
+  "Columns in this result set whose raw values back some :link-field
+   elsewhere (eg a file row's gs: path) — what Download All bundles into a
+   zip. Empty when no column in this result set resolves a :link-field."
+  [columns-info]
+  (set (keep (fn [[_ info]]
+               (when-let [field (:link-field info)]
+                 (field-col-for-kind (:kind info) field columns-info)))
+             columns-info)))
+
+(defn download-all-values
+  "Every non-blank value across `cols` in `results`, in row order,
+   deduplicated — the raw link values (eg gs: paths) to zip up."
+  [results cols]
+  (->> results
+       (mapcat (fn [row] (map row cols)))
+       (remove str/blank?)
+       distinct))
+
+;;; {:all :downloading} while a Download All zip fetch is in flight — one key
+;;; since only one Download All button is ever on screen at a time.
+(defonce download-all-state (reagent/atom {}))
+
+;;; POST (not a plain <a>/query-string GET) since `paths` can be many/long —
+;;; form-encoded as repeated `path` fields, one zip built server-side and
+;;; streamed back as one attachment, so no popup-blocker hazard like N
+;;; individual link clicks would have. Goes through fetch-and-save! (not a
+;;; bare <form> submit) so the button can show progress while the zip is
+;;; being built, which is slower than a single file.
+;;;
+;;; URLSearchParams (application/x-www-form-urlencoded), not FormData
+;;; (multipart/form-data): okc's /api routes (hyperphor.way.handler,
+;;; ring-defaults' api-defaults) only enable :urlencoded params, not
+;;; :multipart — a FormData body silently parses to no params at all, so
+;;; `path` never reaches the handler and every call 400s ("no valid paths").
+(defn submit-download-all!
+  [paths]
+  (let [body (js/URLSearchParams.)]
+    (doseq [p paths] (.append body "path" p))
+    (fetch-and-save! download-all-state :all "/api/download/zip" "download.zip"
+                      {:method "POST" :body body})))
+
+(defn download-all-button
+  "\"Download All\" button, shown only when this result set has at least one
+   resolved :link-field column."
+  [results columns-info]
+  (when-let [cols (seq (link-cols columns-info))]
+    (let [downloading? (= :downloading (get @download-all-state :all))]
+      [:button.btn.btn-primary.mt-2
+       {:style {:align-self "flex-start" :flex-shrink 0}
+        :disabled downloading?
+        :on-click #(submit-download-all! (download-all-values results cols))}
+       (if downloading?
+         [:span [qbox/spinner 1] " Downloading…"]
+         "Download All")])))
+
 ;;; Always an in-app link, even for a kind with an :external-link-template —
 ;;; a study's title is how a user finds/recognizes it in-app; its id/FK
 ;;; columns are what carry the external link instead (see column-def /
@@ -120,28 +271,52 @@
         ;; this the same as "no renderer" rather than building a broken one.
         label-kind (when (:label? info) (:kind info))
         label-id-col (when label-kind (id-col-for-kind label-kind columns-info))
-        icon  (:icon info)
+        ;; A :link-field column (eg :file's :name => :warehouse) links out to
+        ;; a sibling column's raw value rather than a URL built from its own
+        ;; — only usable if this result set actually selected that sibling
+        ;; column (link-col can be nil, same reasoning as label-id-col above).
+        link-field (:link-field info)
+        link-col (when link-field (field-col-for-kind (:kind info) link-field columns-info))
+        link-field-template (:link-template info)
         ;; A resolved column always sits under a group header naming its
         ;; :kind (see ag-column-defs), so the kind part of the raw column
         ;; name (eg subject_sex's "subject") is redundant there — show just
-        ;; the field. Unresolved columns have no group header for context,
-        ;; so keep the full raw name.
+        ;; the field; the group header carries the kind's icon, not this
+        ;; row. Unresolved columns have no group header for context, so
+        ;; keep the full raw name.
         label (if-let [field (:field info)] (name field) (name col))
         renderer (cond
                    link-template (external-link-renderer link-template)
+                   ;; A :link-field column wins over inspect/label handling —
+                   ;; it's an explicit schema opt-in for this exact column
+                   ;; (eg a file's name should download, not drill down), so
+                   ;; there's no case today where both apply to the same
+                   ;; column and disagree.
+                   (and link-field link-col) (link-field-cell-renderer link-col link-field-template)
                    inspect-kind  (inspect-cell-renderer project inspect-kind)
                    (and label-kind label-id-col)
                    (label-inspect-cell-renderer project label-kind label-id-col))]
     (cond-> {:field col
-             :headerName (str (when icon (str icon " ")) label)}
+             :headerName label}
       (:doc info) (assoc :headerTooltip (:doc info))
       renderer    (assoc :cellRenderer renderer))))
 
+(defn effective-kind
+  "The kind a column is grouped and iconified under: its FK :ref-kind if it
+   has one, else its own owning :kind. Must agree with column-def's :icon
+   lookup (same effective-kind logic in schema.clj's resolved-column-info)
+   — otherwise a column can show one kind's icon while sitting in a
+   different kind's group (eg a sample_subject-style FK column showing the
+   referenced kind's icon but grouped with its owning table's own columns)."
+  [info]
+  (or (:ref-kind info) (:kind info)))
+
 (defn column-group-key
-  "Columns with the same owning kind share a key (to be grouped together); an
-   unresolved column gets a key unique to itself, so it doesn't merge or move."
+  "Columns with the same effective kind share a key (to be grouped
+   together); an unresolved column gets a key unique to itself, so it
+   doesn't merge or move."
   [col columns-info]
-  (or (:kind (get columns-info col)) col))
+  (or (effective-kind (get columns-info col)) col))
 
 ;;; A stable group-by, not a resort, so unrelated/unresolved columns stay
 ;;; roughly where the query put them. `group-priority` is optional (eg a
@@ -162,8 +337,8 @@
       [gk (sort-by #(if (id-column? % (get columns-info %)) 0 1) (get groups gk))])))
 
 (defn group-label
-  [kind]
-  (some-> (name kind) (str/replace "-" " ") str/capitalize))
+  [kind icon]
+  (str (when icon (str icon " ")) (some-> (name kind) (str/replace "-" " ") str/capitalize)))
 
 ;;; ag-grid only renders the expand/collapse toggle once some child is
 ;;; marked :columnGroupShow "open" — without it a group header can't be
@@ -174,7 +349,7 @@
    resolved type renders as a plain top-level column, not wrapped."
   [project cols columns-info & [group-priority]]
   (mapv (fn [[gk members]]
-          (let [real-kind? (= gk (:kind (get columns-info (first members))))
+          (let [real-kind? (= gk (effective-kind (get columns-info (first members))))
                 child-defs (map-indexed
                             (fn [i col]
                               (cond-> (column-def project col columns-info)
@@ -182,7 +357,7 @@
                             members)]
             (if real-kind?
               {:groupId (name gk)
-               :headerName (group-label gk)
+               :headerName (group-label gk (:icon (get columns-info (first members))))
                :openByDefault true
                :children (vec child-defs)}
               (first child-defs))))
@@ -362,6 +537,7 @@
        ;; unshrinkable sibling is free to claim 100% of the shared space.
        [:div {:style {:height "50%" :min-height "300px" :flex-shrink 0}}
         [sql-grid-view project results columns]]
+       [download-all-button results columns]
        ;; Not gated on `results`: a visualize attempt can produce an error (e.g.
        ;; "no query results yet") even when there's no main-query data to show,
        ;; and that error still needs to render. Bounded + scrollable (rather

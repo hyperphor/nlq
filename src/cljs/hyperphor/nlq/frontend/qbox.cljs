@@ -1,9 +1,9 @@
 (ns hyperphor.nlq.frontend.qbox
   (:require [re-frame.core :as rf]
+            [reagent.core :as reagent]
+            ["@mui/material" :as m]
             [hyperphor.way.form :as form]
-            [hyperphor.way.web-utils :as wu]
             [hyperphor.way.api :as api]
-            [hyperphor.multitool.core :as u]
             )
   )
 
@@ -26,40 +26,47 @@
      [:span.visually-hidden "Loading..."]]))
 
 
+;;; Query input as a single MUI Autocomplete (freeSolo): type freely, or pick
+;;; an example, in the same field. Was a separate <select> + <textarea>,
+;;; which left a picked example's text visible in both at once (TODO.org).
+;;; Local to this ns rather than promoted to way.material, since nothing
+;;; else uses it yet -- promote there if a second consumer wants it.
+(def autocomplete-adapter (reagent/adapt-react-class m/Autocomplete))
+
 (defn ui
   [id & {:keys [examples button-label project] :or {button-label "Go!"}}]
-  (let [query  @(rf/subscribe [:form-field-value [id :query-text]])]
-
-  [:div.vstack
-   [:div.hstack
-    [form/form-field {:type :textarea
-                      :path [id :query-text]
-                      :style {:width 600
-                              :padding "5px"
-                              :margin-right "5px"
-                              :font-family "sans-serif"
-                              }
-                      }]
-    [:button.btn.btn-primary
-     {:on-click #(rf/dispatch [:qbox-query id project query])
-      :style {:margin-right "3px"}} button-label]
-    (when @(rf/subscribe [:qbox-spin? id])
-      [spinner 2])]
-   (wu/select-widget
-    (u/keyword-conc id :example)
-    nil
-    #(rf/dispatch [:qbox-recall-example id %])
-    (map :nl examples)
-    "Choose an example or type a query above"
-    false
-    {:width "95%"
-     :box-sizing "border-box"
-     :padding "5px"
-     :margin-left "20px"
-     :font-style "italic"
-     :font-size "15px"}
-    ) 
-   ]))
+  (let [query @(rf/subscribe [:form-field-value [id :query-text]])
+        set-query! #(rf/dispatch [:set-form-field-value [id :query-text] %])]
+    [:div.vstack
+     [:div.hstack
+      [autocomplete-adapter
+       {:freeSolo true
+        :options (map :nl examples)
+        :value (or query "")
+        :inputValue (or query "")
+        ;; Fires on every keystroke AND when an option is picked (MUI
+        ;; updates the input's displayed text through this same callback
+        ;; either way) -- one path in, same [id :query-text] the rest of
+        ;; this ns (and sql_query.cljs/sparql_query.cljs) already reads.
+        :onInputChange (fn [_event value _reason] (set-query! value))
+        :style {:width 600 :margin-right "5px"}
+        ;; renderInput is a render prop MUI calls itself, not a plain hiccup
+        ;; slot -- must return a real React element. `params` carries ref/
+        ;; ARIA/event-handler props Autocomplete needs on the underlying
+        ;; input; merge via raw JS (not js->clj, which would corrupt the
+        ;; ref inside it) rather than converting to/from cljs.
+        :renderInput (fn [params]
+                       (reagent/create-element
+                        m/TextField
+                        (js/Object.assign #js {} params
+                                          #js {:placeholder "Type a query, or choose an example"
+                                               :multiline true
+                                               :minRows 2})))}]
+      [:button.btn.btn-primary
+       {:on-click #(rf/dispatch [:qbox-query id project query])
+        :style {:margin-right "3px"}} button-label]
+      (when @(rf/subscribe [:qbox-spin? id])
+        [spinner 2])]]))
 
 (rf/reg-event-db
  :qbox-query
@@ -110,13 +117,6 @@
  (fn [db [_ id]]
    (get-in db [:qbox id :spin?])))
 
-
-(rf/reg-event-db
- :qbox-recall-example
- (fn [db [_ id text]] 
-   (-> db
-       (assoc-in [:form id :query-text] text)
-       )))
 
 ;;; sql_query.cljs/sparql_query.cljs register their card stack as
 ;;; `<id>-cards` (eg :sql -> :sql-cards) -- used below to force the error
