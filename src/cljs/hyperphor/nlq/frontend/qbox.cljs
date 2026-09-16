@@ -26,15 +26,31 @@
      [:span.visually-hidden "Loading..."]]))
 
 
-;;; Query input as a single MUI Autocomplete (freeSolo): type freely, or pick
-;;; an example, in the same field. Was a separate <select> + <textarea>,
-;;; which left a picked example's text visible in both at once (TODO.org).
+;;; Query input as a single MUI Autocomplete combobox (freeSolo):
 ;;; Local to this ns rather than promoted to way.material, since nothing
 ;;; else uses it yet -- promote there if a second consumer wants it.
 (def autocomplete-adapter (reagent/adapt-react-class m/Autocomplete))
 
+;;; Deliberately UNCONTROLLED: no :value/:defaultValue/:inputValue at all,
+;;; just :onInputChange forwarding into [id :query-text]. Controlling it --
+;;; whether from the [id :query-text] subscription (original) or a
+;;; synchronously-updated local reagent atom (tried next) -- reproduced the
+;;; caret-jumps-to-end bug identically either way. Per Reagent's own docs
+;;; (doc/ControlledInputs.md): Reagent has a built-in fix for exactly this
+;;; class of bug (its async rendering can leave a controlled DOM input a
+;;; render behind, and naively re-applying `.value` then snaps the caret to
+;;; the end) -- but that fix only patches inputs Reagent itself creates via
+;;; hiccup (`[:input ...]`, `[:textarea ...]`). This box is a MUI Autocomplete
+;;; + TextField reached through `adapt-react-class`/`create-element`; Reagent
+;;; never sees the underlying <input>, so its fix can't apply, no matter how
+;;; fast the value we feed it updates. Their own documented workaround for
+;;; exactly this situation is to stop controlling it and let the DOM own the
+;;; text, which is what this does. Picking an example from the dropdown still
+;;; works: MUI manages its own internal (uncontrolled) inputValue and fires
+;;; onInputChange for that too, same as for a keystroke.
 (defn ui
-  [id & {:keys [examples button-label project] :or {button-label "Go!"}}]
+  [id & {:keys [examples button-label project placeholder]
+         :or {button-label "Go!" placeholder "Type a query, or choose an example"}}]
   (let [query @(rf/subscribe [:form-field-value [id :query-text]])
         set-query! #(rf/dispatch [:set-form-field-value [id :query-text] %])]
     [:div.vstack
@@ -42,12 +58,6 @@
       [autocomplete-adapter
        {:freeSolo true
         :options (map :nl examples)
-        :value (or query "")
-        :inputValue (or query "")
-        ;; Fires on every keystroke AND when an option is picked (MUI
-        ;; updates the input's displayed text through this same callback
-        ;; either way) -- one path in, same [id :query-text] the rest of
-        ;; this ns (and sql_query.cljs/sparql_query.cljs) already reads.
         :onInputChange (fn [_event value _reason] (set-query! value))
         :style {:width 600 :margin-right "5px"}
         ;; renderInput is a render prop MUI calls itself, not a plain hiccup
@@ -59,7 +69,7 @@
                        (reagent/create-element
                         m/TextField
                         (js/Object.assign #js {} params
-                                          #js {:placeholder "Type a query, or choose an example"
+                                           #js {:placeholder placeholder
                                                :multiline true
                                                :minRows 2})))}]
       [:button.btn.btn-primary

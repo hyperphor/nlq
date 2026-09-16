@@ -45,22 +45,27 @@
      [:span.ag-cell-wrap-text (external-link template (.-value params))])))
 
 (defn link-field-cell-renderer
-  "Cell renderer for a :link-field column (see schema/resolved-column-info):
-   shows this column's own value, hyperlinked off link-col's raw value
-   elsewhere in the same row (eg a filename linking to its gs: path) — through
-   link-template if given (a {{value}} URL template, same convention as
-   :external-link-template), else the sibling value verbatim."
-  [link-col link-template]
+  "Cell renderer for a :link-template column (see schema/resolved-column-
+   info): shows this column's own value, hyperlinked via link-template — a
+   {{var}} URL template. {{self}} is this column's own value; {{project}}
+   is the current NLQ project; any other var must be a key in
+   link-field-cols (a resolved {template-var-kw -> sibling column} map,
+   possibly empty for a field linking off only its own value)."
+  [project link-field-cols link-template]
   (fn [params]
-    (let [link-value (aget (.-data params) (name link-col))
-          ;; link-template puts link-value in a URL — a query param today,
-          ;; maybe a path segment for Cirro later — so encode it rather than
-          ;; assume it's already URL-safe (a gs: path can carry #, &, +, etc,
-          ;; any of which would otherwise truncate or corrupt the URL).
-          href (if link-template
-                 (u/expand-template link-template {:value (js/encodeURIComponent link-value)} :allow-missing? true)
-                 link-value)
-          label (str (.-value params))]
+    (let [self-value (.-value params)
+          ;; Every var goes into a URL — a query param today, maybe a path
+          ;; segment for Cirro later — so encode each rather than assume
+          ;; it's already URL-safe (a gs: path or Cirro path can carry #,
+          ;; &, +, etc, any of which would otherwise truncate or corrupt
+          ;; the URL).
+          vars (into {:self (js/encodeURIComponent self-value)
+                      :project (js/encodeURIComponent project)}
+                     (map (fn [[var-name col]]
+                            [var-name (js/encodeURIComponent (aget (.-data params) (name col)))]))
+                     link-field-cols)
+          href (u/expand-template link-template vars :allow-missing? true)
+          label (str self-value)]
       (reagent/as-element
        [:span.ag-cell-wrap-text
         [:a.ent-ext
@@ -88,7 +93,7 @@
 ;;; fetch + blob + a synthetic <a download>, so a caller can show progress
 ;;; while a slow backend fetch/stream (eg zipping several GCS blobs) is in
 ;;; flight — a plain <a> gives no such signal. Deliberately NOT used for
-;;; individual link-field cells above: those proxy a single GCS blob
+;;; individual link-template cells above: those proxy a single file
 ;;; straight through (gs/download-response, verified byte-exact), and
 ;;; fetch+blob would buffer the whole file in browser memory before saving
 ;;; it, which is fine for a small file but not for an arbitrarily large one
@@ -163,8 +168,9 @@
 
 (defn field-col-for-kind
   "The column (in this result set) carrying kind's `field`, if any — used to
-   resolve a :link-field to the sibling column that actually holds it. nil
-   if that field wasn't selected in this particular query. Requires a nil
+   resolve a :link-fields entry to the sibling column that actually holds
+   it. nil if that field wasn't selected in this particular query. Requires
+   a nil
    :ref-kind, same hazard as inspected-kind-icon below: an FK column's :kind
    is its *owning* table, not the kind it points at, so without this guard a
    same-named FK could be mistaken for the sibling field itself."
@@ -175,62 +181,79 @@
 
 ;;; ── Download All ──────────────────────────────────────────────────────────
 ;;; Schema-driven, like the rest of this ns: keyed off "does this result set
-;;; have a resolved :link-field column" (same resolution field-col-for-kind
-;;; already does for individual cell links), never off a specific kind/field
-;;; name.
+;;; have a :link-template column" — self-linking (eg a gs: path) or
+;;; :link-fields (eg Cirro's dataset+path pair) both included, never a
+;;; specific kind/field name. The backend decides per item how to fetch it
+;;; (a :dataset key means Cirro, its absence means the self-link backend,
+;;; eg gs:) — this ns never builds or interprets a URL, just collects the
+;;; raw values a schema-declared link needs.
 
 (defn link-cols
-  "Columns in this result set whose raw values back some :link-field
-   elsewhere (eg a file row's gs: path) — what Download All bundles into a
-   zip. Empty when no column in this result set resolves a :link-field."
+  "[{:col ... :field-cols {var-name -> col}} ...] for every :link-template
+   column in this result set — what Download All resolves per row into a
+   spec to send the backend. Skips a column whose declared :link-fields
+   aren't all resolvable in this result set (same fallback column-def
+   already applies per-cell); field-cols is {} for a self-link."
   [columns-info]
-  (set (keep (fn [[_ info]]
-               (when-let [field (:link-field info)]
-                 (field-col-for-kind (:kind info) field columns-info)))
-             columns-info)))
+  (keep (fn [[col info]]
+          (when (:link-template info)
+            (let [field-cols (u/map-values #(field-col-for-kind (:kind info) % columns-info)
+                                            (or (:link-fields info) {}))]
+              (when (every? val field-cols)
+                {:col col :field-cols field-cols}))))
+        columns-info))
 
-(defn download-all-values
-  "Every non-blank value across `cols` in `results`, in row order,
-   deduplicated — the raw link values (eg gs: paths) to zip up."
+(defn download-all-specs
+  "Per-row {:self ... var-name ...} specs across `cols` (link-cols' result)
+   in `results` — :self is the link column's own value, other keys are its
+   resolved sibling values (eg :dataset for a Cirro link). Non-blank :self,
+   deduplicated."
   [results cols]
   (->> results
-       (mapcat (fn [row] (map row cols)))
-       (remove str/blank?)
+       (mapcat (fn [row]
+                 (map (fn [{:keys [col field-cols]}]
+                        (into {:self (get row col)}
+                              (map (fn [[var-name sibling-col]] [var-name (get row sibling-col)]))
+                              field-cols))
+                      cols)))
+       (remove #(str/blank? (:self %)))
        distinct))
 
 ;;; {:all :downloading} while a Download All zip fetch is in flight — one key
 ;;; since only one Download All button is ever on screen at a time.
 (defonce download-all-state (reagent/atom {}))
 
-;;; POST (not a plain <a>/query-string GET) since `paths` can be many/long —
-;;; form-encoded as repeated `path` fields, one zip built server-side and
-;;; streamed back as one attachment, so no popup-blocker hazard like N
-;;; individual link clicks would have. Goes through fetch-and-save! (not a
-;;; bare <form> submit) so the button can show progress while the zip is
-;;; being built, which is slower than a single file.
+;;; POST (not a plain <a>/query-string GET) since `specs` can be many/long —
+;;; one zip built server-side and streamed back as one attachment, so no
+;;; popup-blocker hazard like N individual link clicks would have. Goes
+;;; through fetch-and-save! (not a bare <form> submit) so the button can
+;;; show progress while the zip is being built, which is slower than a
+;;; single file.
 ;;;
 ;;; URLSearchParams (application/x-www-form-urlencoded), not FormData
 ;;; (multipart/form-data): okc's /api routes (hyperphor.way.handler,
 ;;; ring-defaults' api-defaults) only enable :urlencoded params, not
-;;; :multipart — a FormData body silently parses to no params at all, so
-;;; `path` never reaches the handler and every call 400s ("no valid paths").
+;;; :multipart — a FormData body silently parses to no params at all. specs
+;;; is a heterogeneous list of maps (a gs: self-link has just :self, a
+;;; Cirro pair also has :dataset), so it goes in as one JSON-encoded field
+;;; rather than repeated same-key fields, which can't carry that shape.
 (defn submit-download-all!
-  [paths]
+  [project specs]
   (let [body (js/URLSearchParams.)]
-    (doseq [p paths] (.append body "path" p))
+    (.append body "payload" (js/JSON.stringify (clj->js {:project project :specs specs})))
     (fetch-and-save! download-all-state :all "/api/download/zip" "download.zip"
                       {:method "POST" :body body})))
 
 (defn download-all-button
   "\"Download All\" button, shown only when this result set has at least one
-   resolved :link-field column."
-  [results columns-info]
+   :link-template column (see link-cols)."
+  [project results columns-info]
   (when-let [cols (seq (link-cols columns-info))]
     (let [downloading? (= :downloading (get @download-all-state :all))]
       [:button.btn.btn-primary.mt-2
        {:style {:align-self "flex-start" :flex-shrink 0}
         :disabled downloading?
-        :on-click #(submit-download-all! (download-all-values results cols))}
+        :on-click #(submit-download-all! project (download-all-specs results cols))}
        (if downloading?
          [:span [qbox/spinner 1] " Downloading…"]
          "Download All")])))
@@ -271,13 +294,17 @@
         ;; this the same as "no renderer" rather than building a broken one.
         label-kind (when (:label? info) (:kind info))
         label-id-col (when label-kind (id-col-for-kind label-kind columns-info))
-        ;; A :link-field column (eg :file's :name => :warehouse) links out to
-        ;; a sibling column's raw value rather than a URL built from its own
-        ;; — only usable if this result set actually selected that sibling
-        ;; column (link-col can be nil, same reasoning as label-id-col above).
-        link-field (:link-field info)
-        link-col (when link-field (field-col-for-kind (:kind info) link-field columns-info))
+        ;; A :link-template column (eg :file's :name => Cirro, :warehouse =>
+        ;; itself) may need sibling columns' values too (:link-fields, eg
+        ;; :name's Cirro dataset id) — only usable if every named sibling
+        ;; actually resolved to a real column in this result set (a missing
+        ;; one — same reasoning as label-id-col above — would build a
+        ;; broken URL, so treat that as "no renderer" instead).
         link-field-template (:link-template info)
+        link-field-cols (when link-field-template
+                          (u/map-values #(field-col-for-kind (:kind info) % columns-info)
+                                        (or (:link-fields info) {})))
+        link-fields-ok? (every? val link-field-cols)
         ;; A resolved column always sits under a group header naming its
         ;; :kind (see ag-column-defs), so the kind part of the raw column
         ;; name (eg subject_sex's "subject") is redundant there — show just
@@ -287,12 +314,13 @@
         label (if-let [field (:field info)] (name field) (name col))
         renderer (cond
                    link-template (external-link-renderer link-template)
-                   ;; A :link-field column wins over inspect/label handling —
-                   ;; it's an explicit schema opt-in for this exact column
-                   ;; (eg a file's name should download, not drill down), so
-                   ;; there's no case today where both apply to the same
-                   ;; column and disagree.
-                   (and link-field link-col) (link-field-cell-renderer link-col link-field-template)
+                   ;; A :link-template column wins over inspect/label
+                   ;; handling — it's an explicit schema opt-in for this
+                   ;; exact column (eg a file's name should download, not
+                   ;; drill down), so there's no case today where both
+                   ;; apply to the same column and disagree.
+                   (and link-field-template link-fields-ok?)
+                   (link-field-cell-renderer project link-field-cols link-field-template)
                    inspect-kind  (inspect-cell-renderer project inspect-kind)
                    (and label-kind label-id-col)
                    (label-inspect-cell-renderer project label-kind label-id-col))]
@@ -501,6 +529,7 @@
   [project results]
   [qbox/ui :sql-vizq {:button-label (if (empty? results) "Waiting for data" "Visualize")
                       :project project
+                      :placeholder "Type a visualization request, or choose an example"
                       :examples (:examples (project-config "Vegalite"))}])
 
 (defn source-link
@@ -537,7 +566,7 @@
        ;; unshrinkable sibling is free to claim 100% of the shared space.
        [:div {:style {:height "50%" :min-height "300px" :flex-shrink 0}}
         [sql-grid-view project results columns]]
-       [download-all-button results columns]
+       [download-all-button project results columns]
        ;; Not gated on `results`: a visualize attempt can produce an error (e.g.
        ;; "no query results yet") even when there's no main-query data to show,
        ;; and that error still needs to render. Bounded + scrollable (rather

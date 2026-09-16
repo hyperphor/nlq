@@ -1,8 +1,8 @@
-;;; Everything here takes the schema it should consult as an explicit
-;;; argument — there is no hardcoded master schema. A consuming app supplies
+;;; Everything here takes the schema as an explicit
+;;; argument A consuming app supplies
 ;;; its own (per project, typically via that project's `:schema` config
 ;;; entry) and can share a common base schema across projects via Alzabo's
-;;; own `:include`, the same way any other Alzabo schema composition works.
+;;; own `:include`
 (ns hyperphor.nlq.schema
   "Alzabo schema loading, plus the semantic-column layer that recovers a SQL
    result column's meaning (kind/field/doc/icon/enum?/ref-kind) via the
@@ -244,7 +244,7 @@
   "Shared shape-builder for column-info's two resolution paths (sql->alz and
    direct-field-lookup) — same fields, same :label?/external-link-template
    gating either way."
-  [schema kind field type doc link-field link-template]
+  [schema kind field type doc link-fields link-template]
   (let [;; type points at another kind => this column is a reference to
         ;; that kind (eg clinical_observation_subject's type is :subject)
         ;; — the effective semantic type for display purposes.
@@ -269,17 +269,20 @@
      ;; id/FK columns are what carry the external link instead.
      :external-link-template (when (or ref-kind own-id?)
                                 (external-link-template schema effective-kind))
-     ;; A field-level :link-field (eg :file's :name => :warehouse) points at
-     ;; a *sibling* field of the same kind whose own value drives the link
-     ;; target — unlike :external-link-template, which builds a URL from
-     ;; this column's own value. Bare field keyword; the frontend resolves
-     ;; it to whatever column in the actual result set carries that field.
-     ;; :link-template is applied to the sibling's value the same way
-     ;; :external-link-template is applied to this column's own value (a
-     ;; {{value}} URL template); nil means use the sibling's value as-is —
-     ;; eg a raw gs: path today, swappable for a Cirro URL template later
-     ;; without any frontend change.
-     :link-field link-field
+     ;; A field-level :link-fields (eg :file's :name => {:dataset
+     ;; :cirro-dataset}) names *sibling* fields of the same kind whose
+     ;; values feed :link-template, alongside the column's own value —
+     ;; unlike :external-link-template, which only ever builds a URL from
+     ;; this column's own value. A map of {template-var-kw sibling-field-
+     ;; kw}, possibly empty (a field needing no sibling — eg :warehouse
+     ;; downloading itself — just omits it); the frontend resolves each
+     ;; named field to whatever column in the actual result set carries
+     ;; it. :link-template is a {{var}} URL template with three kinds of
+     ;; var available: {{self}} (this column's own value, always),
+     ;; {{project}} (the current NLQ project name, always, built in by the
+     ;; frontend — not schema-declared), and whatever names :link-fields
+     ;; itself declares (eg {{dataset}}).
+     :link-fields link-fields
      :link-template link-template}))
 
 ;;; The :direct-field-lookup? opt-in matters: direct-field-lookup matches a
@@ -300,11 +303,11 @@
    direct-field-lookup. nil if the column doesn't resolve either way."
   [schema col-name]
   (if-let [[kind field] (sql->alz schema col-name)]
-    (when-let [{:keys [type doc link-field link-template]} (field-def schema kind field)]
-      (resolved-column-info schema kind field type doc link-field link-template))
-    (if-let [{:keys [kind field type doc link-field link-template]} (when (:direct-field-lookup? schema)
-                                                                        (direct-field-lookup schema col-name))]
-      (resolved-column-info schema kind field type doc link-field link-template)
+    (when-let [{:keys [type doc link-fields link-template]} (field-def schema kind field)]
+      (resolved-column-info schema kind field type doc link-fields link-template))
+    (if-let [{:keys [kind field type doc link-fields link-template]} (when (:direct-field-lookup? schema)
+                                                                         (direct-field-lookup schema col-name))]
+      (resolved-column-info schema kind field type doc link-fields link-template)
       (when (and (get-in schema [:kinds :gene])
                  (str/includes? (str/lower-case col-name) "gene"))
         {:kind :gene
