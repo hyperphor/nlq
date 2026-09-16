@@ -730,11 +730,15 @@
   (let [[bucket & prefix-parts] (-> domain (str/replace #"^s3://" "") (str/split #"/"))]
     [bucket (str/join "/" prefix-parts)]))
 
-(defn download-file
-  "Downloads dataset-id's file at `path` (one of get-dataset-files' :files
-   entries' own :path) to local file `dest`, via a fresh PROJECT_DOWNLOAD-
-   scoped S3 token per call. Returns dest."
-  [db dataset-id path dest]
+;;; Requires capabilities: VIEW_DATASET, VIEW_PROJECT, GENERATE_DOWNLOAD_TOKEN
+(defn get-object
+  "Raw S3 GetObject result (:Body an InputStream, plus whatever
+   :ContentType/:ContentLength S3 hands back) for dataset-id's file at
+   `path` (one of get-dataset-files' :files entries' own :path), via a
+   fresh PROJECT_DOWNLOAD-scoped S3 token. Shared by download-file (writes
+   to a local dest) and any HTTP-streaming caller (eg okc's Cirro download
+   route) that wants the bytes without a local-file round-trip."
+  [db dataset-id path]
   (let [{:keys [domain]} (get-dataset-files db dataset-id)
         [bucket prefix]  (domain->bucket+prefix domain)
         key              (str prefix "/" path)
@@ -745,10 +749,16 @@
     (if (:cognitect.anomalies/category result)
       (throw (ex-info (str "S3 GetObject failed: " (:cognitect.anomalies/message result "unknown error"))
                       {:bucket bucket :key key :result result}))
-      (do (io/make-parents dest)
-          (with-open [in ^java.io.InputStream (:Body result)]
-            (io/copy in (io/file dest)))
-          dest))))
+      result)))
+
+(defn download-file
+  "Downloads dataset-id's file at `path` to local file `dest`. Returns dest."
+  [db dataset-id path dest]
+  (let [{:keys [Body]} (get-object db dataset-id path)]
+    (io/make-parents dest)
+    (with-open [in ^java.io.InputStream Body]
+      (io/copy in (io/file dest)))
+    dest))
 
 (defn download-dataset
   "Downloads every file in dataset-id into local directory `dest-dir`,
