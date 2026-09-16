@@ -59,6 +59,7 @@
        {:freeSolo true
         :options (map :nl examples)
         :onInputChange (fn [_event value _reason] (set-query! value))
+        :disablePortal true
         :style {:width 600 :margin-right "5px"}
         ;; renderInput is a render prop MUI calls itself, not a plain hiccup
         ;; slot -- must return a real React element. `params` carries ref/
