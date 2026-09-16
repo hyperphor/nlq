@@ -110,12 +110,22 @@
 (rf/reg-event-db
  :qbox-requery
  (fn [db [_ id project]]
-   (api/api-get "/data" {:params {:data-id "nlq-requery"
-                                  :project project
-                                  :query-type (name id)
-                                  :query (get-in db [:form id :query-code])}
-                         :handler (fn [response] (rf/dispatch [:qbox-query-response id response]))})
-   (assoc-in db [:qbox id :spin?] true)))
+   (if (= id :sql-vizq)
+     ;; Viz spec lives entirely on the client — parse the edited JSON and
+     ;; write it straight into the response atom; no server round-trip needed.
+     (let [json-str (get-in db [:form id :query-code])]
+       (try
+         (assoc-in db [:qbox id :response :viz-spec]
+                   (js->clj (js/JSON.parse json-str) :keywordize-keys true))
+         (catch js/Error _
+           (assoc-in db [:qbox id :response :error] "Invalid Vega-Lite JSON"))))
+     (do
+       (api/api-get "/data" {:params {:data-id "nlq-requery"
+                                      :project project
+                                      :query-type (name id)
+                                      :query (get-in db [:form id :query-code])}
+                             :handler (fn [response] (rf/dispatch [:qbox-query-response id response]))})
+       (assoc-in db [:qbox id :spin?] true)))))
 
 (rf/reg-sub
  :qbox-results
@@ -147,10 +157,10 @@
      true (assoc-in [:qbox id :spin?] false)
      true (assoc-in [:qbox id :response] response)
      ;; Seed the editable-query pane (see query-editor/:qbox-requery) with
-     ;; the query this response just ran, so edit+rerun starts from it. Not
-     ;; unconditional -- a vis-query response (:sql-vizq) carries :viz-spec/
-     ;; :viz-text instead of :query, and would otherwise blank the field.
-     (:query response) (assoc-in [:form id :query-code] (:query response)))))
+     ;; the query this response just ran, so edit+rerun starts from it.
+     (:query response)    (assoc-in [:form id :query-code] (:query response))
+     (:viz-spec response) (assoc-in [:form id :query-code]
+                                    (js/JSON.stringify (clj->js (:viz-spec response)) nil 2)))))
 
 (rf/reg-sub
  :qbox-response

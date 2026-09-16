@@ -3,8 +3,7 @@
             [clojure.string :as str]
             [clojure.data.json :as json]
             [hyperphor.nlq.config :as nlq]
-            [hyperphor.ellum.util :as llm-util]
-            ))
+            [hyperphor.ellum.util :as llm-util]))
 
 ;;; Vis generation has its own "Vegalite" entry in config.edn's :nlq (own :llm,
 ;;; own :examples) — it's not a data project, so *project-conf* here is always
@@ -79,3 +78,4 @@
               [:viz-spec :viz-text] (viz-generate-with-data :nl data)))]
       (record project response-object @*last-llm-call*)
       (update response-object :error #(when % (print-str %))))))
+
