@@ -4,6 +4,7 @@
             ["@mui/material" :as m]
             [hyperphor.way.form :as form]
             [hyperphor.way.api :as api]
+            [hyperphor.way.web-utils :as wu]
             )
   )
 
@@ -11,20 +12,6 @@
 ;;; TODO examples should be optional 
 ;;; TODO incorporate error handling (which logically should not be a separate card)
 ;;; TODO maybe incorporate code result
-
-;;; Patched, already in way
-(defn spinner
-  "Make a spinner. Size 10 is big, size 1 or 2 is good"
-  [& [size]]
-  (let [size (or size 10)]
-    ;; [:div.text-center
-    [:div.spinner-border {:role "status"
-                          :style {:width (str size "em")
-                                  :height (str size "em")
-                                  :flex-shrink 0
-                                  :border-width (str (/ size 10.0) "em")}}
-     [:span.visually-hidden "Loading..."]]))
-
 
 ;;; Query input as a single MUI Autocomplete combobox (freeSolo):
 ;;; Local to this ns rather than promoted to way.material, since nothing
@@ -77,7 +64,7 @@
        {:on-click #(rf/dispatch [:qbox-query id project query])
         :style {:margin-right "3px"}} button-label]
       (when @(rf/subscribe [:qbox-spin? id])
-        [spinner 2])]]))
+        [wu/spinner 2])]]))
 
 (rf/reg-event-db
  :qbox-query
