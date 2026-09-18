@@ -3,7 +3,9 @@
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
-  :deploy-repositories [["clojars" {:sign-releases false}]]
+  :deploy-repositories [["clojars" {:sign-releases false
+                                     :username :env/clojars_username
+                                     :password :env/clojars_password}]]
   :dependencies [[org.clojure/clojure "1.12.5"]
                  [com.hyperphor/multitool "0.3.1"]
                  [com.hyperphor/way "0.2.7"]
