@@ -63,3 +63,25 @@ Should ideally be able to act as chat UI for Claude etc (no more or less than th
 Should somehow subsume both logseq and any other random collection of text
 
 Imagine this could be a general UI for any kind of agent system (assuming it was open and monitorable, which is probably not the case).
+
+# Further thoughts
+
+After making a separate visualization pane in AACT
+
+Yes this is even more obviously in need of a repl. And one where you can wire a panel into another.
+
+Should just do it. I guess I'm resiting because too obvious?
+
+In Logseq, always worrying about place, is this the right place for this thought. You kind of do it in Claude to with their project architecture. 
+
+A single universal REPL (or multiple with different contexts, either way).
+
+# Not exactly a REPL issue but
+
+It is stupid (or at least, unnecessary) to have separate SQL and dataviz prompts. It's the same thing, and that way if you need to add a field to a visualization, you don't have to redo the query.
+
+But not sure how unification should work. I imagine a prompt would still usually be in two parts, data spec and viz spec. but it could be done more simply, and all the data reqs could be in the dv.
+
+Hm. The model is, you ask questions of the data in text, and it generates a dv if appropriate or if asked. 
+
+Doesn't Claude Science do this? I bet it does, I'm afraid to look.
