@@ -485,7 +485,7 @@
   "Insert `rows` (a seq of maps, column name -> value) into `sheet-id`,
    batched into groups of 1000 (Cirro's insertSheetData cap). Returns total rowsAffected."
   [{:keys [project] :as db} sheet-id rows]
-  (loop [batches (partition-all 1000 rows), inserted 0]
+  (loop [batches (partition-all 500 rows), inserted 0]
     (if (empty? batches)
       inserted
       (let [batch (first batches)
