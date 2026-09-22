@@ -88,6 +88,7 @@
 
 (u/defn-memoized read-schema
   [schema-file]
+  (prn :read-schema schema-file)
   (-> schema-file
       resource-file
       alzs/read-schema
@@ -244,7 +245,7 @@
   "Shared shape-builder for column-info's two resolution paths (sql->alz and
    direct-field-lookup) — same fields, same :label?/external-link-template
    gating either way."
-  [schema kind field type doc link-fields link-template]
+  [schema kind field type doc link-fields link-template field-external-link-template]
   (let [;; type points at another kind => this column is a reference to
         ;; that kind (eg clinical_observation_subject's type is :subject)
         ;; — the effective semantic type for display purposes.
@@ -259,16 +260,21 @@
      :ref-kind ref-kind
      :label? label?
      :icon (kind-icon schema effective-kind)
-     ;; A kind's :external-link-template is a link destination for its own
-     ;; id/FK columns, never for the kind's other data fields (eg a study's
-     ;; :phase shouldn't render as a link to clinicaltrials.gov just because
-     ;; :studies has an external link) and never for the :label field either
-     ;; — a study's title is how a user finds/recognizes it in-app, so the
-     ;; label field always stays an in-app inspector link (see
-     ;; hyperphor.nlq.frontend.sql-query/label-inspect-cell-renderer); its
-     ;; id/FK columns are what carry the external link instead.
-     :external-link-template (when (or ref-kind own-id?)
-                                (external-link-template schema effective-kind))
+     ;; Field-level :external-link-template (eg :file/:cirro-dataset linking
+     ;; straight to Cirro's own dataset page) wins when a field declares its
+     ;; own — the obvious, direct place for "this field's value means a page
+     ;; elsewhere is available" to live, and it doesn't need the field to be
+     ;; typed as a fake reference kind just to borrow one. Falls back to a
+     ;; kind's own :external-link-template for its id/FK columns (eg a
+     ;; study's own id opening clinicaltrials.gov, or any FK typed as
+     ;; :gene) — never for a kind's other data fields (a study's :phase
+     ;; shouldn't link out just because :studies has one) and never for the
+     ;; :label field (a study's title stays an in-app inspector link, see
+     ;; hyperphor.nlq.frontend.sql-query/label-inspect-cell-renderer; its
+     ;; id/FK columns carry the external link instead).
+     :external-link-template (or field-external-link-template
+                                 (when (or ref-kind own-id?)
+                                   (external-link-template schema effective-kind)))
      ;; A field-level :link-fields (eg :file's :name => {:dataset
      ;; :cirro-dataset}) names *sibling* fields of the same kind whose
      ;; values feed :link-template, alongside the column's own value —
@@ -303,11 +309,12 @@
    direct-field-lookup. nil if the column doesn't resolve either way."
   [schema col-name]
   (if-let [[kind field] (sql->alz schema col-name)]
-    (when-let [{:keys [type doc link-fields link-template]} (field-def schema kind field)]
-      (resolved-column-info schema kind field type doc link-fields link-template))
-    (if-let [{:keys [kind field type doc link-fields link-template]} (when (:direct-field-lookup? schema)
-                                                                         (direct-field-lookup schema col-name))]
-      (resolved-column-info schema kind field type doc link-fields link-template)
+    (when-let [{:keys [type doc link-fields link-template external-link-template]} (field-def schema kind field)]
+      (resolved-column-info schema kind field type doc link-fields link-template external-link-template))
+    (if-let [{:keys [kind field type doc link-fields link-template external-link-template]}
+             (when (:direct-field-lookup? schema)
+               (direct-field-lookup schema col-name))]
+      (resolved-column-info schema kind field type doc link-fields link-template external-link-template)
       (when (and (get-in schema [:kinds :gene])
                  (str/includes? (str/lower-case col-name) "gene"))
         {:kind :gene
