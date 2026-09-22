@@ -284,7 +284,10 @@
                     (if (set? subproject)
                       (contains? subproject (:name %))
                       (str/includes? (:name %) subproject))))
-       (filter #(pos? (:totalRowCount %)))))
+       ;; ??? Why was this here? Update doc. Looks like deleteion of sheets can fail
+       #_ (filter #(pos? (:totalRowCount %)))
+       ;; remove system sheets, these can't be deleted
+       (remove #(= (:namespaceName %) "cirro_entity"))))
 
 ;;; Project management
 
@@ -523,21 +526,23 @@
             {:accessType "SHEET_UPLOAD"
              :sheetId sheet-id}))
 
-;;; The bucket half is confirmed live (checked against a real dataset-
-;;; manifest :domain in the PRINCE-PICI tenant: project-<projectId>, exact
-;;; match). The /data/ segment in the key is still inferred rather than
-;;; confirmed — by analogy with the Python SDK's FileAccessContext/
-;;; upload_dataset, which explicitly writes datasets under <domain>/data/...
-;;; (distinct from the bare domain s3://project-<id>/datasets/<id> that
-;;; read/manifest contexts use) — a first guess without it (bare
-;;; sheets/<sheetId>/<filename>) got a live AccessDenied despite the bucket
-;;; being right, consistent with the write scope actually being
-;;; sheets/<sheetId>/data/*. See design/cirro-file-upload.md.
+;;; Both prior guesses here (sheets/<sheetId>/<filename>, then
+;;; sheets/<sheetId>/data/<filename> by analogy with the Python SDK's
+;;; dataset-upload convention) got a live AccessDenied -- "no session policy
+;;; allows the s3:PutObject action" -- despite the bucket being right (see
+;;; design/cirro-file-upload.md). No need to guess at all, though: SheetDetail
+;;; (get-sheet) already returns :stagingUploadPath, the exact s3:// URI
+;;; SHEET_UPLOAD's session policy actually scopes to -- confirmed live, a PUT
+;;; under it succeeds. Turns out to be sheets/staging/<sheetId>/, not
+;;; sheets/<sheetId>/... at all.
 (defn- sheet-upload-location
-  "{:bucket :key} to PUT a sheet-upload file at."
-  [{:keys [project]} sheet-id filename]
-  {:bucket (str "project-" project)
-   :key    (u/tx "sheets/{{sheet-id}}/data/{{filename}}")})
+  "{:bucket :key} to PUT a sheet-upload file at, read off sheet-id's own
+   :stagingUploadPath rather than guessed."
+  [db sheet-id filename]
+  (let [staging-uri (:stagingUploadPath (get-sheet db sheet-id))
+        [_ bucket prefix] (re-matches #"s3://([^/]+)/(.+)" staging-uri)]
+    {:bucket bucket
+     :key    (str prefix "/" filename)}))
 
 ;;; aws-creds/basic-credentials-provider won't do here: checked live (and
 ;;; against aws-api 0.8.838's own source), it only ever forwards
