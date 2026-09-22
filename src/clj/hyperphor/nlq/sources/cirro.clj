@@ -81,6 +81,18 @@
      (api-post-unchecked db url params)
      full-url)))
 
+(defn api-put
+  [{:keys [host] :as db} url params]
+  (let [full-url (str "https://" host url)]
+    (check-response
+     (client/put full-url
+                 {:body             (json/write-str params)
+                  :content-type     :application/json
+                  :headers          {"Authorization" (str "Bearer " (get-access-token db))}
+                  :as               :json
+                  :throw-exceptions false})
+     full-url)))
+
 ;;; Cognito app client id, auth domain, and region are all tenant-specific —
 ;;; fetch them together from /api/info/system
 (u/defn-memoized cirro-system-info
@@ -258,10 +270,20 @@
         (recur (inc page) acc)))))
 
 (defn project-sheets
+  "Sheets in db's project belonging to db's :subproject (nil means all),
+   with at least one row. :subproject is either a substring every wanted
+   sheet's :name contains (the original convention -- fine when the
+   substring is otherwise unique in the tenant), or a set of exact :name
+   values -- needed when sheet names don't share a safe common substring
+   (eg PRINCE's Cirro project also has several same-named-pattern
+   abandoned/duplicate sheets that a substring match can't tell apart from
+   the real ones -- see pici-config.edn)."
   [{:keys [project subproject] :as db}]
   (->> (api-get db (u/tx "/api/projects/{{project}}/sheets") {})
        (filter #(or (nil? subproject)
-                    (str/includes? (:name %) subproject)))
+                    (if (set? subproject)
+                      (contains? subproject (:name %))
+                      (str/includes? (:name %) subproject))))
        (filter #(pos? (:totalRowCount %)))))
 
 ;;; Project management
@@ -376,6 +398,42 @@
              :columns (mapv (fn [{:keys [name type]}]
                                {:name name :dataType (str/upper-case (clojure.core/name type))})
                              columns)}))
+
+(defn get-sheet
+  "Full SheetDetail for sheet-id (id, name, tableName, columns with their
+   ids, schemaVersionId, etc) — what update-sheet! needs as a starting point
+   for its full-target-state PUT, unlike sheet-columns which only pulls out
+   :table-name/:columns for DDL purposes."
+  [{:keys [project] :as db} sheet-id]
+  (api-get db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}") {}))
+
+;;; TableSheetInput's own fields, pulled off a SheetDetail (a superset:
+;;; id/projectId/status/createdBy/createdAt/updatedAt/totalRowCount/virtual/
+;;; lastRefreshedAt/stagingUploadPath/viewDefinition aren't valid on input).
+(def ^:private table-sheet-input-keys
+  [:name :description :namespaceName :tableName :auditReadAccess
+   :sheetCreationMode :columns :schemaVersionId :tags :sheetType])
+
+(defn update-sheet!
+  "PUT sheet-id's full target state (per Cirro's idempotent-update contract:
+   send the whole SheetInput, server diffs mutable fields). `detail` is a
+   SheetDetail as returned by get-sheet; `overrides` is merged on top (eg
+   {:name \"new name\"}) before sending — the rest of detail's current
+   state (columns with their existing ids, tableName, etc) round-trips
+   unchanged, so this is safe to use for a metadata-only change like a
+   rename. dry-run? uses Cirro's own dryRun query param (no-op, just
+   returns what would change) — check with that first before a real call."
+  [{:keys [project] :as db} sheet-id detail overrides & {:keys [dry-run?]}]
+  (let [qs (if dry-run? "?dryRun=true" "")]
+    (api-put db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}{{qs}}")
+             (merge (select-keys detail table-sheet-input-keys) overrides))))
+
+(defn rename-sheet!
+  "Change sheet-id's display :name, leaving everything else (columns,
+   tableName, etc) as-is. Fetches current state itself, so callers don't
+   need a stale get-sheet result lying around."
+  [db sheet-id new-name & {:keys [dry-run?]}]
+  (update-sheet! db sheet-id (get-sheet db sheet-id) {:name new-name} :dry-run? dry-run?))
 
 (defn list-sheet-jobs
   "The SheetJob history for `sheet-id` (status/failedAtStep/errorMessage) —
