@@ -17,3 +17,11 @@ package-lock.json
 design/*.html
 scrap
 design/archive/
+
+# demo/ -- a separate lein project nested in this repo (see design/demo-app.md);
+# root-anchored ignores above don't reach into it.
+demo/target
+demo/checkouts
+demo/shadow-cljs.edn
+demo/resources/public/cljs-out
+demo/resources/public/*/schema
