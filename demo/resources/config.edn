@@ -1,0 +1,32 @@
+;;; hyperphor/nlq-demo config. Read via Aero (hyperphor.way.config/read-config).
+;;;
+;;; To investigate a different database, just edit :nlq below -- no code changes.
+;;; Each entry is one project: :db (a hyperphor.nlq.sources.sql backend -- see
+;;; the sources/*.clj namespaces required by hyperphor.nlq.demo.core for the
+;;; :provider options and their :db shape), :sql-dialect (free text, told to the
+;;; LLM), :llm (:provider/:model), :examples (few-shot NL/SQL pairs -- optional
+;;; but improves generation quality a lot), and an optional :schema (an Alzabo
+;;; schema file path, adds semantic columns/click-to-inspect + a Schema tab entry).
+;;;
+;;; This ships seeded with the same SQLite sample verified in
+;;; ../design/sqlite.md/../dev-resources/config.edn -- the opencode CLI's own
+;;; local session-history database. Swap :dbname for your own SQLite file, or
+;;; replace the whole entry with a :postgres/:bigquery/:cirro one.
+
+{:app-title "nlq-demo"
+ :app-main "hyperphor.nlq.demo.frontend.core.init"
+
+ :nlq
+ [{:name "OpenCode"
+   :db {:provider :sqlite :dbname "/Users/mt/.local/share/opencode/opencode.db"}
+   :sql-dialect "SQLite"
+   :llm {:provider :openai :model "gpt-4o"}
+   :examples
+   [{:nl "How many sessions are there?"
+     :sql "select count(*) from session"}
+    {:nl "Show the 5 most recently created sessions with their titles"
+     :sql "select id, title, time_created from session order by time_created desc limit 5"}
+    {:nl "How many messages are in each session?"
+     :sql "select session_id, count(*) as n from message group by session_id order by n desc"}
+    {:nl "Show session titles alongside how many messages each one has"
+     :sql "select s.title, count(m.id) as message_count from session s left join message m on m.session_id = s.id group by s.id order by message_count desc"}]}]}
