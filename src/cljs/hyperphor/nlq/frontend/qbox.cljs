@@ -2,8 +2,10 @@
   (:require [re-frame.core :as rf]
             [reagent.core :as reagent]
             ["@mui/material" :as m]
+            ["react-dom" :refer [flushSync]]
             [hyperphor.way.form :as form]
             [hyperphor.way.api :as api]
+            [hyperphor.way.web-utils :as wu]
             )
   )
 
@@ -12,53 +14,94 @@
 ;;; TODO incorporate error handling (which logically should not be a separate card)
 ;;; TODO maybe incorporate code result
 
-;;; Patched, already in way
-(defn spinner
-  "Make a spinner. Size 10 is big, size 1 or 2 is good"
-  [& [size]]
-  (let [size (or size 10)]
-    ;; [:div.text-center
-    [:div.spinner-border {:role "status"
-                          :style {:width (str size "em")
-                                  :height (str size "em")
-                                  :flex-shrink 0
-                                  :border-width (str (/ size 10.0) "em")}}
-     [:span.visually-hidden "Loading..."]]))
-
-
 ;;; Query input as a single MUI Autocomplete combobox (freeSolo):
 ;;; Local to this ns rather than promoted to way.material, since nothing
 ;;; else uses it yet -- promote there if a second consumer wants it.
 (def autocomplete-adapter (reagent/adapt-react-class m/Autocomplete))
 
-;;; Deliberately UNCONTROLLED: no :value/:defaultValue/:inputValue at all,
-;;; just :onInputChange forwarding into [id :query-text]. Controlling it --
-;;; whether from the [id :query-text] subscription (original) or a
-;;; synchronously-updated local reagent atom (tried next) -- reproduced the
-;;; caret-jumps-to-end bug identically either way. Per Reagent's own docs
-;;; (doc/ControlledInputs.md): Reagent has a built-in fix for exactly this
-;;; class of bug (its async rendering can leave a controlled DOM input a
-;;; render behind, and naively re-applying `.value` then snaps the caret to
-;;; the end) -- but that fix only patches inputs Reagent itself creates via
-;;; hiccup (`[:input ...]`, `[:textarea ...]`). This box is a MUI Autocomplete
-;;; + TextField reached through `adapt-react-class`/`create-element`; Reagent
-;;; never sees the underlying <input>, so its fix can't apply, no matter how
-;;; fast the value we feed it updates. Their own documented workaround for
-;;; exactly this situation is to stop controlling it and let the DOM own the
-;;; text, which is what this does. Picking an example from the dropdown still
-;;; works: MUI manages its own internal (uncontrolled) inputValue and fires
-;;; onInputChange for that too, same as for a keystroke.
+;;; Controlled from [id :query-text] via :inputValue/:onInputChange, same
+;;; path everything else already reads/writes -- so the box always
+;;; re-renders from app state and can never go blank just because it got
+;;; unmounted/remounted (eg by a parent card list rebuilding its :view
+;;; closures on every render -- see sql_query.cljs/sparql_query.cljs). This
+;;; was briefly made fully uncontrolled instead, to chase a
+;;; caret-jumps-to-end bug -- but that traded a caret bug for silently
+;;; losing typed text, which is worse. Deliberately no :value here (unlike
+;;; the original controlled version): for a freeSolo box the typed text
+;;; isn't a "selected option", and controlling both makes Autocomplete treat
+;;; every keystroke as picking a new value, which re-syncs :inputValue via
+;;; its own internal effect outside Reagent's render cycle -- one more path
+;;; that can reset the caret.
+;;;
+;;; Even with only :inputValue controlled, re-applying a string the DOM
+;;; already holds can still snap the caret to the end -- the same class of
+;;; bug Reagent's own docs describe and patch for (doc/ControlledInputs.md),
+;;; but only for inputs Reagent creates directly via hiccup; this one is a
+;;; MUI component reached through adapt-react-class/create-element, so
+;;; Reagent never sees the underlying <input>/<textarea> to apply its fix.
+;;;
+;;; Do the same fix by hand -- capture the caret off the native input event,
+;;; then restore it -- but restoring after the fact only works if the DOM
+;;; already reflects the keystroke that just happened. Confirmed by logging
+;;; (see git history) that it doesn't, reliably: this app mounts via
+;;; react-dom/client's createRoot (a concurrent root), so a re-render
+;;; triggered from outside React's own event handling (which is what a
+;;; re-frame dispatch does -- it lands via goog.async.nextTick, not inside
+;;; React's synthetic event) gets scheduled rather than committed
+;;; immediately. Waiting via reagent/after-render, or even stacking extra
+;;; requestAnimationFrame callbacks on top, did not reliably land after that
+;;; commit -- the DOM was still showing the *previous* keystroke's value
+;;; every time, regardless of how many frames were given.
+;;;
+;;; The reliable fix is to not wait at all: force the whole
+;;; dispatch->app-db->reaction->re-render->DOM-commit chain to happen
+;;; synchronously, inside this same event handler, via dispatch-sync +
+;;; reagent/flush (which forces Reagent's pending render queue to run now
+;;; instead of on the next animation frame) wrapped in React's flushSync
+;;; (which is what actually forces a concurrent root to commit immediately
+;;; instead of scheduling it). With that, the DOM already has the new value
+;;; by the time we restore the caret, so no waiting/guessing is needed.
+(defonce ^:private caret-positions (atom {}))
+
+(defn- capture-caret!
+  [id event]
+  (let [node (.-target event)]
+    (swap! caret-positions assoc id
+           {:node node :start (.-selectionStart node) :end (.-selectionEnd node)})))
+
+(defn- restore-caret!
+  [id]
+  (when-let [{:keys [node start end]} (get @caret-positions id)]
+    (when (.-isConnected node)
+      (.setSelectionRange node start end))))
+
 (defn ui
   [id & {:keys [examples button-label project placeholder]
          :or {button-label "Go!" placeholder "Type a query, or choose an example"}}]
-  (let [query @(rf/subscribe [:form-field-value [id :query-text]])
-        set-query! #(rf/dispatch [:set-form-field-value [id :query-text] %])]
+  (let [query @(rf/subscribe [:form-field-value [id :query-text]])]
     [:div.vstack
      [:div.hstack
       [autocomplete-adapter
        {:freeSolo true
         :options (map :nl examples)
-        :onInputChange (fn [_event value _reason] (set-query! value))
+        :inputValue (or query "")
+        :onInputChange (fn [event value reason]
+                         ;; Only a keystroke needs its caret preserved --
+                         ;; picking an example (reason "reset"/"selectOption")
+                         ;; has no caret position worth restoring, and its
+                         ;; event target isn't necessarily the text field.
+                         (when (= reason "input") (capture-caret! id event))
+                         ;; flushSync+dispatch-sync+reagent/flush forces the
+                         ;; dispatch -> app-db -> reaction -> re-render -> DOM
+                         ;; commit chain to finish synchronously, right here,
+                         ;; instead of being scheduled for later (see comment
+                         ;; above caret-positions) -- so by the time we
+                         ;; restore-caret! below, the DOM already has the new
+                         ;; value and the caret position is meaningful.
+                         (flushSync (fn []
+                                      (rf/dispatch-sync [:set-form-field-value [id :query-text] value])
+                                      (reagent/flush)))
+                         (when (= reason "input") (restore-caret! id)))
         :disablePortal true
         :style {:width 600 :margin-right "5px"}
         ;; renderInput is a render prop MUI calls itself, not a plain hiccup
@@ -77,7 +120,7 @@
        {:on-click #(rf/dispatch [:qbox-query id project query])
         :style {:margin-right "3px"}} button-label]
       (when @(rf/subscribe [:qbox-spin? id])
-        [spinner 2])]]))
+        [wu/spinner 2])]]))
 
 (rf/reg-event-db
  :qbox-query

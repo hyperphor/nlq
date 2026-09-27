@@ -108,18 +108,22 @@
         ddl     (sql/project-ddl db schema)  ;TODO this might grow too large esp with separate assay-level tables.
         system  (get llm :system "You are an expert in relational databases and SQL.")]
     (-> (llm-complete
-         [{:role :user
-           :content (str "Example queries. Do not translate these, use them as a guide: " (pr-str (example-queries :sql)))}
-          (when schema
-            {:role :user
-             :content (str "This is an Alzabo schema:  " schema)})
-          {:role :user
-           :content (str "Use this SQL DDL definition. Table names and columns must come from here: " ddl)}
-          {:role :user
-           :content (str "SQL dialect is " sql-dialect)} ; eg documented at https://trino.io/docs/current/sql/select.html
-          ;; Note: putting this at the end is more efficient (LLMs will cache the constant prefix, maybe)
-          {:role :user
-           :content (str "Please translate this query to an SQL SELECT statement. Include the SQL code in a code block: " nl)}]
+         ;; `schema` is optional (see alz-schema) -- (remove nil? ...) drops
+         ;; that message entirely rather than passing a bare nil through to
+         ;; the provider, which chokes trying to (name (:role nil)).
+         (remove nil?
+                 [{:role :user
+                   :content (str "Example queries. Do not translate these, use them as a guide: " (pr-str (example-queries :sql)))}
+                  (when schema
+                    {:role :user
+                     :content (str "This is an Alzabo schema:  " schema)})
+                  {:role :user
+                   :content (str "Use this SQL DDL definition. Table names and columns must come from here: " ddl)}
+                  {:role :user
+                   :content (str "SQL dialect is " sql-dialect)} ; eg documented at https://trino.io/docs/current/sql/select.html
+                  ;; Note: putting this at the end is more efficient (LLMs will cache the constant prefix, maybe)
+                  {:role :user
+                   :content (str "Please translate this query to an SQL SELECT statement. Include the SQL code in a code block: " nl)}])
          :system system)
         llm-util/extract-code)))
 
@@ -144,14 +148,16 @@
                         "like `CONTAINS(?label, \"...\")` over unknown entities, is fine and often the "
                         "only option.)"))]
     (-> (llm-complete
-         [{:role :user
-           :content (str "Example queries. Do not translate these, use them as a guide: " (pr-str (example-queries :sparql)))}
-          (when-let [schema (alz-schema)]
-            {:role :user
-             :content (str "This is an Alzabo schema describing the relevant ontology -- each field's "
-                          ":doc names the actual predicate/class it corresponds to: " schema)})
-          {:role :user
-           :content (str "Please translate this query to a SPARQL SELECT statement. Include the SPARQL code in a code block: " nl)}]
+         ;; See generate :sql's identical (remove nil? ...) -- schema is optional here too.
+         (remove nil?
+                 [{:role :user
+                   :content (str "Example queries. Do not translate these, use them as a guide: " (pr-str (example-queries :sparql)))}
+                  (when-let [schema (alz-schema)]
+                    {:role :user
+                     :content (str "This is an Alzabo schema describing the relevant ontology -- each field's "
+                                  ":doc names the actual predicate/class it corresponds to: " schema)})
+                  {:role :user
+                   :content (str "Please translate this query to a SPARQL SELECT statement. Include the SPARQL code in a code block: " nl)}])
          :system system)
         llm-util/extract-code)))
 

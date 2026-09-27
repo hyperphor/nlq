@@ -6,6 +6,7 @@
             [hyperphor.way.api :as api]
             [hyperphor.way.cards :as cards]
             [hyperphor.way.markdown :as md]
+            [hyperphor.way.web-utils :as wayu]
             [hyperphor.way.ui.config :as config]
             [hyperphor.multitool.core :as u]
             [hyperphor.nlq.frontend.qbox :as qbox]
@@ -255,7 +256,7 @@
         :disabled downloading?
         :on-click #(submit-download-all! project (download-all-specs results cols))}
        (if downloading?
-         [:span [qbox/spinner 1] " Downloading…"]
+         [:span [wayu/spinner 1] " Downloading…"]
          "Download All")])))
 
 ;;; Always an in-app link, even for a kind with an :external-link-template —
@@ -482,12 +483,12 @@
       ;; Only the very first inspection ever has no prior row to fall back on;
       ;; every subsequent click keeps showing the previous entity (below) until
       ;; the new one lands, rather than blanking the grid in between.
-      (not row) [qbox/spinner 2]
+      (not row) [wayu/spinner 2]
       :else [:div
              [:h3.inspect-head.alert.alert-primary
               (when-let [icon (inspected-kind-icon kind columns)] (str icon " "))
               kind " " id
-              (when loading? [:span.ms-2 [qbox/spinner 1]])]
+              (when loading? [:span.ms-2 [wayu/spinner 1]])]
              [inspector-grid project row columns]])))
 
 ;;; Fetched explicitly from the click event below, rather than via way's

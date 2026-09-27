@@ -81,6 +81,18 @@
      (api-post-unchecked db url params)
      full-url)))
 
+(defn api-put
+  [{:keys [host] :as db} url params]
+  (let [full-url (str "https://" host url)]
+    (check-response
+     (client/put full-url
+                 {:body             (json/write-str params)
+                  :content-type     :application/json
+                  :headers          {"Authorization" (str "Bearer " (get-access-token db))}
+                  :as               :json
+                  :throw-exceptions false})
+     full-url)))
+
 ;;; Cognito app client id, auth domain, and region are all tenant-specific —
 ;;; fetch them together from /api/info/system
 (u/defn-memoized cirro-system-info
@@ -258,11 +270,24 @@
         (recur (inc page) acc)))))
 
 (defn project-sheets
+  "Sheets in db's project belonging to db's :subproject (nil means all),
+   with at least one row. :subproject is either a substring every wanted
+   sheet's :name contains (the original convention -- fine when the
+   substring is otherwise unique in the tenant), or a set of exact :name
+   values -- needed when sheet names don't share a safe common substring
+   (eg PRINCE's Cirro project also has several same-named-pattern
+   abandoned/duplicate sheets that a substring match can't tell apart from
+   the real ones -- see pici-config.edn)."
   [{:keys [project subproject] :as db}]
   (->> (api-get db (u/tx "/api/projects/{{project}}/sheets") {})
        (filter #(or (nil? subproject)
-                    (str/includes? (:name %) subproject)))
-       (filter #(pos? (:totalRowCount %)))))
+                    (if (set? subproject)
+                      (contains? subproject (:name %))
+                      (str/includes? (:name %) subproject))))
+       ;; ??? Why was this here? Update doc. Looks like deleteion of sheets can fail
+       #_ (filter #(pos? (:totalRowCount %)))
+       ;; remove system sheets, these can't be deleted
+       (remove #(= (:namespaceName %) "cirro_entity"))))
 
 ;;; Project management
 
@@ -377,6 +402,42 @@
                                {:name name :dataType (str/upper-case (clojure.core/name type))})
                              columns)}))
 
+(defn get-sheet
+  "Full SheetDetail for sheet-id (id, name, tableName, columns with their
+   ids, schemaVersionId, etc) — what update-sheet! needs as a starting point
+   for its full-target-state PUT, unlike sheet-columns which only pulls out
+   :table-name/:columns for DDL purposes."
+  [{:keys [project] :as db} sheet-id]
+  (api-get db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}") {}))
+
+;;; TableSheetInput's own fields, pulled off a SheetDetail (a superset:
+;;; id/projectId/status/createdBy/createdAt/updatedAt/totalRowCount/virtual/
+;;; lastRefreshedAt/stagingUploadPath/viewDefinition aren't valid on input).
+(def ^:private table-sheet-input-keys
+  [:name :description :namespaceName :tableName :auditReadAccess
+   :sheetCreationMode :columns :schemaVersionId :tags :sheetType])
+
+(defn update-sheet!
+  "PUT sheet-id's full target state (per Cirro's idempotent-update contract:
+   send the whole SheetInput, server diffs mutable fields). `detail` is a
+   SheetDetail as returned by get-sheet; `overrides` is merged on top (eg
+   {:name \"new name\"}) before sending — the rest of detail's current
+   state (columns with their existing ids, tableName, etc) round-trips
+   unchanged, so this is safe to use for a metadata-only change like a
+   rename. dry-run? uses Cirro's own dryRun query param (no-op, just
+   returns what would change) — check with that first before a real call."
+  [{:keys [project] :as db} sheet-id detail overrides & {:keys [dry-run?]}]
+  (let [qs (if dry-run? "?dryRun=true" "")]
+    (api-put db (u/tx "/api/projects/{{project}}/sheets/{{sheet-id}}{{qs}}")
+             (merge (select-keys detail table-sheet-input-keys) overrides))))
+
+(defn rename-sheet!
+  "Change sheet-id's display :name, leaving everything else (columns,
+   tableName, etc) as-is. Fetches current state itself, so callers don't
+   need a stale get-sheet result lying around."
+  [db sheet-id new-name & {:keys [dry-run?]}]
+  (update-sheet! db sheet-id (get-sheet db sheet-id) {:name new-name} :dry-run? dry-run?))
+
 (defn list-sheet-jobs
   "The SheetJob history for `sheet-id` (status/failedAtStep/errorMessage) —
    diagnostic for insert failures, since insert-sheet-rows' own response
@@ -424,7 +485,7 @@
   "Insert `rows` (a seq of maps, column name -> value) into `sheet-id`,
    batched into groups of 1000 (Cirro's insertSheetData cap). Returns total rowsAffected."
   [{:keys [project] :as db} sheet-id rows]
-  (loop [batches (partition-all 1000 rows), inserted 0]
+  (loop [batches (partition-all 500 rows), inserted 0]
     (if (empty? batches)
       inserted
       (let [batch (first batches)
@@ -465,21 +526,23 @@
             {:accessType "SHEET_UPLOAD"
              :sheetId sheet-id}))
 
-;;; The bucket half is confirmed live (checked against a real dataset-
-;;; manifest :domain in the PRINCE-PICI tenant: project-<projectId>, exact
-;;; match). The /data/ segment in the key is still inferred rather than
-;;; confirmed — by analogy with the Python SDK's FileAccessContext/
-;;; upload_dataset, which explicitly writes datasets under <domain>/data/...
-;;; (distinct from the bare domain s3://project-<id>/datasets/<id> that
-;;; read/manifest contexts use) — a first guess without it (bare
-;;; sheets/<sheetId>/<filename>) got a live AccessDenied despite the bucket
-;;; being right, consistent with the write scope actually being
-;;; sheets/<sheetId>/data/*. See design/cirro-file-upload.md.
+;;; Both prior guesses here (sheets/<sheetId>/<filename>, then
+;;; sheets/<sheetId>/data/<filename> by analogy with the Python SDK's
+;;; dataset-upload convention) got a live AccessDenied -- "no session policy
+;;; allows the s3:PutObject action" -- despite the bucket being right (see
+;;; design/cirro-file-upload.md). No need to guess at all, though: SheetDetail
+;;; (get-sheet) already returns :stagingUploadPath, the exact s3:// URI
+;;; SHEET_UPLOAD's session policy actually scopes to -- confirmed live, a PUT
+;;; under it succeeds. Turns out to be sheets/staging/<sheetId>/, not
+;;; sheets/<sheetId>/... at all.
 (defn- sheet-upload-location
-  "{:bucket :key} to PUT a sheet-upload file at."
-  [{:keys [project]} sheet-id filename]
-  {:bucket (str "project-" project)
-   :key    (u/tx "sheets/{{sheet-id}}/data/{{filename}}")})
+  "{:bucket :key} to PUT a sheet-upload file at, read off sheet-id's own
+   :stagingUploadPath rather than guessed."
+  [db sheet-id filename]
+  (let [staging-uri (:stagingUploadPath (get-sheet db sheet-id))
+        [_ bucket prefix] (re-matches #"s3://([^/]+)/(.+)" staging-uri)]
+    {:bucket bucket
+     :key    (str prefix "/" filename)}))
 
 ;;; aws-creds/basic-credentials-provider won't do here: checked live (and
 ;;; against aws-api 0.8.838's own source), it only ever forwards

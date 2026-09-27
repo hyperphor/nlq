@@ -1,9 +1,11 @@
-(defproject com.hyperphor/nlq "0.3.27"
+(defproject com.hyperphor/nlq "0.3.28"
   :description "Natural-language query engine for structured databases (SQL, SPARQL, ...) —  See design/hyperphorization.md"
   :url "https://github.com/hyperphor/nlq"
   :license {:name "EPL-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
-  :deploy-repositories [["clojars" {:sign-releases false}]]
+  :deploy-repositories [["clojars" {:sign-releases false
+                                    :username :env/clojars_username
+                                    :password :env/clojars_password}]]
   :dependencies [[org.clojure/clojure "1.12.5"]
                  [com.hyperphor/multitool "0.3.1"]
                  [com.hyperphor/way "0.2.7"]
@@ -30,9 +32,14 @@
                  ;; own native :dbtype/:host/:port/:dbname/:user/:password
                  ;; map format already covers with no extra dependency.
                  [org.clojure/java.jdbc "0.7.12"]
-                 [org.postgresql/postgresql "42.7.13"]]
+                 [org.postgresql/postgresql "42.7.13"]
+                 ;; sources/sqlite.clj
+                 [org.xerial/sqlite-jdbc "3.46.1.3"]]
   :source-paths ["src/cljc" "src/clj" "src/cljs"]
   :target-path "target/%s"
-  :profiles {:dev {:dependencies [[thheller/shadow-cljs "3.1.8"]]}
+  :profiles {:dev {:dependencies [[thheller/shadow-cljs "3.1.8"]]
+                   ;; dev-resources/config.edn -- a sample :nlq project for
+                   ;; REPL exploration only, never packaged with the library.
+                   :resource-paths ["dev-resources"]}
              :uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}})
