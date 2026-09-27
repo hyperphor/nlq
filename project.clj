@@ -32,9 +32,14 @@
                  ;; own native :dbtype/:host/:port/:dbname/:user/:password
                  ;; map format already covers with no extra dependency.
                  [org.clojure/java.jdbc "0.7.12"]
-                 [org.postgresql/postgresql "42.7.13"]]
+                 [org.postgresql/postgresql "42.7.13"]
+                 ;; sources/sqlite.clj
+                 [org.xerial/sqlite-jdbc "3.46.1.3"]]
   :source-paths ["src/cljc" "src/clj" "src/cljs"]
   :target-path "target/%s"
-  :profiles {:dev {:dependencies [[thheller/shadow-cljs "3.1.8"]]}
+  :profiles {:dev {:dependencies [[thheller/shadow-cljs "3.1.8"]]
+                   ;; dev-resources/config.edn -- a sample :nlq project for
+                   ;; REPL exploration only, never packaged with the library.
+                   :resource-paths ["dev-resources"]}
              :uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}})
