@@ -44,10 +44,14 @@
 
 (defn app-ui
   []
+  ;; First key must be :home -- hyperphor.way.ui.init's :initialize-db hardcodes
+  ;; the initial :route to [:home] (its own TODO notes this isn't configurable
+  ;; yet), so tabs-nav's active-tab lookup misses on first render otherwise,
+  ;; rendering nil in place of a component and crashing on mount.
   [tabs/tabs-nav
    :tab
    (array-map
-    :query universal-query/ui
+    :home universal-query/ui
     :schema schema)
    []])
 
